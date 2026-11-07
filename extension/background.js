@@ -1,5 +1,6 @@
-// Kendali background service worker.
+// Kendali background service worker (module).
 // Connects to the local Kendali MCP server over WebSocket and executes browser tools.
+import { GIFEncoder, quantize, applyPalette } from './lib/gifenc.esm.js';
 
 const DEFAULT_PORT = 18765;
 const VERSION = chrome.runtime.getManifest().version;
@@ -11,7 +12,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // =====================================================================
 let ws = null;
 let connected = false;
-let busy = false; // server refused us because another browser is connected
 let retry = 0;
 let pingTimer = null;
 let retryTimer = null;
@@ -19,6 +19,24 @@ let retryTimer = null;
 async function getPort() {
   const { port } = await chrome.storage.local.get('port');
   return +port || DEFAULT_PORT;
+}
+
+// stable identity of this browser profile, so MCP clients can tell several browsers apart
+async function identity() {
+  let { deviceId, deviceName } = await chrome.storage.local.get(['deviceId', 'deviceName']);
+  if (!deviceId) {
+    deviceId = crypto.randomUUID();
+    await chrome.storage.local.set({ deviceId });
+  }
+  const pi = await chrome.runtime.getPlatformInfo();
+  const os = { mac: 'macOS', win: 'Windows', linux: 'Linux', cros: 'ChromeOS', android: 'Android' }[pi.os] || pi.os;
+  const brand = (navigator.userAgentData?.brands || []).map((b) => b.brand).find((b) => !/not|chromium/i.test(b)) || 'Chrome';
+  return { deviceId, name: deviceName || `${brand} on ${os} (${deviceId.slice(0, 4)})`, platform: os };
+}
+
+async function hello(s) {
+  const id = await identity();
+  if (s.readyState === WebSocket.OPEN) s.send(JSON.stringify({ type: 'hello', version: VERSION, inst: INSTANCE, ...id }));
 }
 
 function badge(on) {
@@ -45,10 +63,9 @@ async function connect() {
   ws = s;
   s.onopen = () => {
     connected = true;
-    busy = false;
     retry = 0;
     badge(true);
-    s.send(JSON.stringify({ type: 'hello', version: VERSION, inst: INSTANCE }));
+    hello(s);
     // traffic keeps the MV3 service worker alive (Chrome 116+)
     clearInterval(pingTimer);
     pingTimer = setInterval(() => s.readyState === WebSocket.OPEN && s.send('{"type":"ping"}'), 20000);
@@ -59,17 +76,27 @@ async function connect() {
     if (ws !== s) return;
     ws = null;
     connected = false;
-    busy = e.code === 4001;
     clearInterval(pingTimer);
     badge(false);
-    if (busy) { clearTimeout(retryTimer); retryTimer = setTimeout(connect, 10000); } // another browser has it
-    else reschedule();
+    reschedule();
   };
 }
 
 function reschedule() {
   clearTimeout(retryTimer);
   retryTimer = setTimeout(connect, Math.min(3000, 300 * 2 ** retry++));
+}
+
+// switch_browser: every connected browser shows a confirmation window; the one the user accepts wins
+const pairWins = new Map(); // pair id -> windowId
+async function openPairWindow(id) {
+  const w = await chrome.windows.create({ url: chrome.runtime.getURL(`pair.html?id=${encodeURIComponent(id)}`), type: 'popup', width: 440, height: 300, focused: true });
+  pairWins.set(id, w.id);
+}
+function closePairWindow(id) {
+  const w = pairWins.get(id);
+  pairWins.delete(id);
+  if (w != null) chrome.windows.remove(w).catch(() => {});
 }
 
 function reply(sock, msg) {
@@ -79,6 +106,8 @@ function reply(sock, msg) {
 async function onMessage(sock, raw) {
   let m;
   try { m = JSON.parse(raw); } catch { return; }
+  if (m.type === 'pair') return openPairWindow(m.id);
+  if (m.type === 'pair_done') return closePairWindow(m.id);
   if (!m.id || !m.tool) return;
   try {
     let result = await run(m.tool, m.args || {});
@@ -95,7 +124,23 @@ chrome.runtime.onStartup.addListener(() => connect());
 chrome.runtime.onInstalled.addListener(() => connect());
 chrome.runtime.onMessage.addListener((msg, _s, send) => {
   if (msg?.type === 'status') {
-    getPort().then((port) => send({ connected, busy, port }));
+    Promise.all([getPort(), identity()]).then(([port, id]) => send({ connected, port, ...id }));
+    return true;
+  }
+  if (msg?.type === 'setName') {
+    chrome.storage.local.set({ deviceName: String(msg.name || '').trim().slice(0, 60) }).then(() => {
+      if (ws) hello(ws);
+      send({ ok: true });
+    });
+    return true;
+  }
+  if (msg?.type === 'pairAccept') {
+    (async () => {
+      if (msg.name) await chrome.storage.local.set({ deviceName: String(msg.name).trim().slice(0, 60) });
+      const id = await identity();
+      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'pair_accept', id: msg.id, name: id.name }));
+      send({ ok: !!ws });
+    })();
     return true;
   }
   if (msg?.type === 'setPort') {
@@ -115,15 +160,27 @@ connect();
 // =====================================================================
 // helpers
 // =====================================================================
+async function setLast(id) {
+  await chrome.storage.session.set({ kdLast: id }).catch(() => {});
+}
 async function tabOf(a) {
   if (a.tabId != null) {
-    try { return await chrome.tabs.get(+a.tabId); } catch { throw new Error(`tab ${a.tabId} not found — call tabs_context`); }
+    let t;
+    try { t = await chrome.tabs.get(+a.tabId); } catch { throw new Error(`tab ${a.tabId} not found — call tabs_context_mcp`); }
+    setLast(t.id);
+    return t;
+  }
+  // default: the tab Kendali used last, else the focused tab
+  const { kdLast } = await chrome.storage.session.get('kdLast').catch(() => ({}));
+  if (kdLast != null) {
+    const t = await chrome.tabs.get(kdLast).catch(() => null);
+    if (t) return t;
   }
   const [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (t) return t;
   const [t2] = await chrome.tabs.query({ active: true });
   if (t2) return t2;
-  throw new Error('no active tab — call tabs_create');
+  throw new Error('no active tab — call tabs_create_mcp');
 }
 
 function withTimeout(p, ms, msg) {
@@ -370,12 +427,21 @@ async function screenshot(tab, a = {}) {
     const k = Math.min(1, 1600 / bmp.width);
     ow = Math.round(bmp.width * k); oh = Math.round(bmp.height * k);
   }
-  const canvas = new OffscreenCanvas(ow, oh);
-  canvas.getContext('2d').drawImage(bmp, sx, sy, sw, sh, 0, 0, ow, oh);
   const mime = a.format === 'png' ? 'image/png' : 'image/jpeg';
-  const blob = await canvas.convertToBlob({ type: mime, quality: a.quality ?? 0.8 });
-  const what = a.region ? `zoom of region [${a.region.join(',')}]` : a.full_page ? 'full-page screenshot' : `viewport screenshot (${ow}x${oh}; pixel coords = click coords)`;
-  return { text: `${what} of tab ${tabId}: ${tab.title} | ${tab.url}`, image: { data: await blobToB64(blob), mimeType: mime } };
+  const enc = async (w, h) => {
+    const canvas = new OffscreenCanvas(w, h);
+    canvas.getContext('2d').drawImage(bmp, sx, sy, sw, sh, 0, 0, w, h);
+    return { data: await blobToB64(await canvas.convertToBlob({ type: mime, quality: a.quality ?? 0.8 })), mimeType: mime };
+  };
+  const full = await enc(ow, oh);
+  let what = a.region ? `zoom of region [${a.region.join(',')}]` : a.full_page ? 'full-page screenshot' : `viewport screenshot (${ow}x${oh}; pixel coords = click coords)`;
+  const scale = Math.min(1, Math.max(0.1, +a.scale || 1));
+  if (scale < 1) {
+    const w = Math.max(1, Math.round(ow * scale)), h = Math.max(1, Math.round(oh * scale));
+    what += ` — image scaled to ${w}x${h}; coordinates stay in the full ${ow}x${oh} frame`;
+    return { text: `${what} of tab ${tabId}: ${tab.title} | ${tab.url}`, image: await enc(w, h), full };
+  }
+  return { text: `${what} of tab ${tabId}: ${tab.title} | ${tab.url}`, image: full };
 }
 
 // =====================================================================
@@ -383,32 +449,67 @@ async function screenshot(tab, a = {}) {
 // =====================================================================
 const T = {};
 
-T.tabs_context = async () => {
-  const tabs = await chrome.tabs.query({});
-  const [focused] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  const byWin = new Map();
-  for (const t of tabs) {
-    if (!byWin.has(t.windowId)) byWin.set(t.windowId, []);
-    byWin.get(t.windowId).push(t);
-  }
-  const lines = [];
-  for (const [w, list] of byWin) {
-    lines.push(`window ${w}:`);
-    for (const t of list) {
-      const flags = [t.id === focused?.id ? 'FOCUSED' : t.active ? 'active' : '', t.status === 'loading' ? 'loading' : '', dbg.has(t.id) ? 'debug' : ''].filter(Boolean).join(',');
-      lines.push(`  tabId ${t.id}${flags ? ` [${flags}]` : ''} ${(t.title || '').slice(0, 80)} | ${t.url}`);
-    }
-  }
-  return lines.join('\n');
+// Kendali keeps the tabs it opens in its own tab group (like Claude in Chrome's MCP group)
+async function getGroup() {
+  const { kdGroup } = await chrome.storage.session.get('kdGroup').catch(() => ({}));
+  if (kdGroup == null) return null;
+  return chrome.tabGroups.get(kdGroup).then(() => kdGroup, () => null);
+}
+async function groupTabs() {
+  const g = await getGroup();
+  return g == null ? [] : chrome.tabs.query({ groupId: g });
+}
+async function addToGroup(tabId) {
+  let g = await getGroup();
+  try {
+    if (g != null) return await chrome.tabs.group({ groupId: g, tabIds: [tabId] });
+    g = await chrome.tabs.group({ tabIds: [tabId] });
+    await chrome.tabGroups.update(g, { title: 'Kendali', color: 'green' });
+    await chrome.storage.session.set({ kdGroup: g });
+    return g;
+  } catch { return null; } // e.g. popup windows can't hold groups
+}
+async function ensureGroupTab() {
+  const tabs = await groupTabs();
+  if (tabs.length) return tabs;
+  const w = await chrome.windows.create({ url: 'about:blank', focused: true });
+  await addToGroup(w.tabs[0].id);
+  await setLast(w.tabs[0].id);
+  return groupTabs();
+}
+
+async function tabsContext() {
+  const [tabs, mine, [focused]] = await Promise.all([chrome.tabs.query({}), groupTabs(), chrome.tabs.query({ active: true, lastFocusedWindow: true })]);
+  const ids = new Set(mine.map((t) => t.id));
+  const line = (t) => {
+    const flags = [t.id === focused?.id ? 'FOCUSED' : t.active ? 'active' : '', t.status === 'loading' ? 'loading' : '', dbg.has(t.id) ? 'debug' : ''].filter(Boolean).join(',');
+    return `  tabId ${t.id}${flags ? ` [${flags}]` : ''} ${(t.title || '').slice(0, 80)} | ${t.url || t.pendingUrl || ''}`;
+  };
+  const out = [mine.length ? `Kendali tab group (${mine.length} tab${mine.length > 1 ? 's' : ''}) — yours to use:` : 'Kendali tab group: none yet (tabs_create_mcp, or tabs_context_mcp {createIfEmpty:true})', ...mine.map(line)];
+  const own = chrome.runtime.getURL('');
+  const others = tabs.filter((t) => !ids.has(t.id) && !(t.url || t.pendingUrl || '').startsWith(own));
+  if (others.length) out.push(`Other tabs (the user's — only use one if the user asks):`, ...others.map(line));
+  return out.join('\n');
+}
+
+T.tabs_context_mcp = async (a) => {
+  if (a.createIfEmpty) await ensureGroupTab();
+  return tabsContext();
 };
 
-T.tabs_create = async (a) => {
-  const t = await chrome.tabs.create({ url: a.url ? normUrl(a.url) : 'about:blank', active: a.active !== false });
+T.tabs_create_mcp = async (a) => {
+  const g = await getGroup();
+  let windowId;
+  if (g != null) windowId = (await chrome.tabGroups.get(g)).windowId;
+  else windowId = (await chrome.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null))?.id;
+  const t = await chrome.tabs.create({ url: a.url ? normUrl(a.url) : 'about:blank', active: a.active !== false, windowId });
+  await addToGroup(t.id);
+  await setLast(t.id);
   const done = a.url ? await waitLoad(t.id, a.timeout || 20000) : t;
-  return `created tabId ${t.id}: ${done.title || ''} | ${done.url || done.pendingUrl || ''}`;
+  return `created tabId ${t.id} in the Kendali tab group: ${done.title || ''} | ${done.url || done.pendingUrl || ''}`;
 };
 
-T.tabs_close = async (a) => {
+T.tabs_close_mcp = async (a) => {
   const ids = [].concat(a.tabIds ?? a.tabId ?? []).map(Number);
   if (!ids.length) throw new Error('tabId or tabIds required');
   await chrome.tabs.remove(ids);
@@ -429,20 +530,36 @@ function normUrl(u) {
 }
 
 T.navigate = async (a) => {
-  const tab = await tabOf(a);
   const u = String(a.url || '').trim().toLowerCase();
+  let tab, ctx = false;
+  if (a.tabId == null && !['back', 'forward', 'reload'].includes(u)) {
+    // like Claude in Chrome: no tabId → use (or create) a tab in Kendali's own group
+    const mine = await ensureGroupTab();
+    const { kdLast } = await chrome.storage.session.get('kdLast').catch(() => ({}));
+    tab = mine.find((t) => t.id === kdLast) || mine[0];
+    await setLast(tab.id);
+    ctx = true;
+  } else {
+    tab = await tabOf(a);
+  }
   if (u === 'back') await chrome.tabs.goBack(tab.id);
   else if (u === 'forward') await chrome.tabs.goForward(tab.id);
   else if (u === 'reload') await chrome.tabs.reload(tab.id, { bypassCache: !!a.hard });
   else await chrome.tabs.update(tab.id, { url: normUrl(a.url) });
   const t = await waitLoad(tab.id, a.timeout || 20000);
-  return `tabId ${t.id} ${t.status === 'complete' ? 'loaded' : 'still loading'}: ${t.title} | ${t.url}`;
+  const msg = `tabId ${t.id} ${t.status === 'complete' ? 'loaded' : 'still loading'}: ${t.title} | ${t.url}`;
+  return ctx ? `${msg}\n\n${await tabsContext()}` : msg;
 };
 
 T.read_page = async (a) => {
   const tab = await tabOf(a);
+  // Claude-in-Chrome params (filter/ref_id/depth/max_chars) read the whole page; Kendali's default is the viewport
+  const whole = a.filter || a.ref_id != null || a.max_chars;
   const s = await page(tab.id, 'snap', {
-    scope: a.scope || 'view', max: a.max_lines || 150, text: !!a.include_text, diff: !!a.diff, settle: true,
+    scope: a.scope || (whole ? 'all' : 'view'),
+    max: a.max_lines || (whole ? 20000 : 150),
+    text: a.include_text ?? a.filter === 'all',
+    diff: !!a.diff, settle: true, root: a.ref_id, depth: a.depth, maxChars: a.max_chars || 50000,
   });
   return `tabId ${tab.id}\n${s}`;
 };
@@ -597,7 +714,7 @@ T.javascript_tool = async (a) => {
   dialogGuard(tab.id);
   const timeout = Math.min(+a.timeout_ms || 30000, 300000);
   const r = await cdp(tab.id, 'Runtime.evaluate', {
-    expression: String(a.code), awaitPromise: true, returnByValue: true, replMode: true, userGesture: true, allowUnsafeEvalBlockedByCSP: true,
+    expression: String(a.code ?? a.text ?? ''), awaitPromise: true, returnByValue: true, replMode: true, userGesture: true, allowUnsafeEvalBlockedByCSP: true,
   }, timeout);
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
   const v = r.result || {};
@@ -613,7 +730,7 @@ T.read_console_messages = async (a) => {
   const st = await attach(tab.id);
   const fresh = st.fresh; st.fresh = false;
   let list = st.console;
-  if (a.only_errors) list = list.filter((m) => /error|exception|assert/.test(m.level));
+  if (a.only_errors || a.onlyErrors) list = list.filter((m) => /error|exception|assert/.test(m.level));
   if (a.pattern) { const re = new RegExp(a.pattern, 'i'); list = list.filter((m) => re.test(m.text) || re.test(m.url)); }
   const lim = +a.limit || 100;
   const out = list.slice(-lim).map((m) => `[${m.level}] ${clip(m.text || '', 500)}${m.url ? `  (${m.url.slice(0, 100)})` : ''}`);
@@ -634,6 +751,7 @@ T.read_network_requests = async (a) => {
   const fresh = st.fresh; st.fresh = false;
   let list = [...st.net.values()];
   if (a.url_pattern) { const re = new RegExp(a.url_pattern, 'i'); list = list.filter((r) => re.test(r.url)); }
+  if (a.urlPattern) list = list.filter((r) => r.url.includes(a.urlPattern));
   if (a.only_failed) list = list.filter((r) => r.failed || r.status >= 400);
   if (a.types) { const ty = [].concat(a.types).map((x) => x.toLowerCase()); list = list.filter((r) => ty.includes(r.type.toLowerCase())); }
   const lim = +a.limit || 100;
@@ -691,7 +809,7 @@ async function waitDownload(id, timeout) {
     await sleep(300);
   }
 }
-const fmtDl = (d) => `#${d.id} ${d.state}${d.error ? ' (' + d.error + ')' : ''} ${d.filename || '(pending)'} ← ${d.finalUrl || d.url}`.slice(0, 400)
+const fmtDl = (d) => `#${d.id} ${d.state}${d.error ? ' (' + d.error + ')' : ''} ${d.filename || '(pending)'} ← ${/^data:/.test(d.finalUrl || d.url) ? '(generated data)' : (d.finalUrl || d.url)}`.slice(0, 400)
   + (d.state === 'in_progress' && d.totalBytes > 0 ? ` ${Math.round((100 * d.bytesReceived) / d.totalBytes)}%` : '');
 
 T.download = async (a) => {
@@ -762,6 +880,101 @@ T.history = async (a) => {
     text: a.query || '', maxResults: +a.limit || 30, startTime: Date.now() - (+a.days || 7) * 86400000,
   });
   return items.length ? items.map((h) => `${new Date(h.lastVisitTime).toISOString().slice(0, 16)} ${(h.title || '').slice(0, 70)} | ${h.url}`).join('\n') : 'no history matches';
+};
+
+// ---- upload_image / gif ----------------------------------------------
+const MIME_OF = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
+
+async function reencode(data, from, to) {
+  const bmp = await createImageBitmap(await b64ToBlob(data, from));
+  const c = new OffscreenCanvas(bmp.width, bmp.height);
+  c.getContext('2d').drawImage(bmp, 0, 0);
+  return blobToB64(await c.convertToBlob({ type: to, quality: 0.92 }));
+}
+
+async function dropFile(a, data, mime, name) {
+  const tab = await tabOf(a);
+  if (a.ref == null && !a.coordinate) throw new Error('provide ref (file input or drop target) or coordinate [x,y] (drop location)');
+  const [x, y] = a.coordinate || [];
+  const r = await page(tab.id, 'drop', { ref: a.ref, x, y, b64: data, mime, name });
+  return r.msg;
+}
+
+T.upload_image = async (a) => {
+  const name = a.filename || 'image.png';
+  let { data, mime } = a;
+  const want = MIME_OF[(/\.(\w+)$/.exec(name)?.[1] || '').toLowerCase()];
+  if (want && want !== mime && want !== 'image/gif') { data = await reencode(data, mime, want); mime = want; }
+  return dropFile(a, data, mime, name);
+};
+
+T.gif_render = async (a) => {
+  const o = { showClickIndicators: true, showDragPaths: true, showActionLabels: true, showProgressBar: true, showWatermark: true, quality: 10, ...(a.options || {}) };
+  const frames = a.frames || [];
+  if (!frames.length) throw new Error('no frames recorded');
+  const bmps = await Promise.all(frames.map(async (f) => createImageBitmap(await b64ToBlob(f.data, f.mime || 'image/jpeg'))));
+  const q = Math.min(30, Math.max(1, +o.quality || 10));
+  const maxW = q <= 5 ? 1280 : q <= 15 ? 960 : 720;
+  const W = Math.min(maxW, bmps[0].width);
+  const H = Math.round((bmps[0].height * W) / bmps[0].width);
+  const fmt = q <= 10 ? 'rgb565' : 'rgb444';
+  const gif = GIFEncoder();
+  const canvas = new OffscreenCanvas(W, H);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  for (let i = 0; i < frames.length; i++) {
+    const f = frames[i], bmp = bmps[i];
+    const k = Math.min(W / bmp.width, H / bmp.height);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.drawImage(bmp, 0, 0, bmp.width * k, bmp.height * k);
+    if (o.showDragPaths && f.drag) {
+      const [[x0, y0], [x1, y1]] = f.drag.map(([x, y]) => [x * k, y * k]);
+      ctx.strokeStyle = '#dc2626'; ctx.fillStyle = '#dc2626'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+      const ang = Math.atan2(y1 - y0, x1 - x0);
+      ctx.beginPath(); ctx.moveTo(x1, y1);
+      ctx.lineTo(x1 - 14 * Math.cos(ang - 0.4), y1 - 14 * Math.sin(ang - 0.4));
+      ctx.lineTo(x1 - 14 * Math.cos(ang + 0.4), y1 - 14 * Math.sin(ang + 0.4));
+      ctx.closePath(); ctx.fill();
+    }
+    if (o.showClickIndicators && f.click) {
+      const [x, y] = [f.click[0] * k, f.click[1] * k];
+      ctx.fillStyle = 'rgba(249,115,22,0.35)'; ctx.strokeStyle = '#f97316'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(x, y, 16, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    }
+    if (o.showActionLabels && f.label) {
+      ctx.font = '600 15px system-ui, sans-serif';
+      const text = f.label.length > 90 ? f.label.slice(0, 89) + '…' : f.label;
+      const tw = ctx.measureText(text).width;
+      ctx.fillStyle = 'rgba(0,0,0,0.78)';
+      ctx.beginPath(); ctx.roundRect(12, H - 52, tw + 24, 30, 8); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.fillText(text, 24, H - 32);
+    }
+    if (o.showProgressBar) {
+      ctx.fillStyle = 'rgba(0,0,0,0.15)'; ctx.fillRect(0, H - 6, W, 6);
+      ctx.fillStyle = '#f97316'; ctx.fillRect(0, H - 6, (W * (i + 1)) / frames.length, 6);
+    }
+    if (o.showWatermark) {
+      ctx.font = '700 13px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(22,163,74,0.85)';
+      ctx.fillText('Kendali', W - ctx.measureText('Kendali').width - 12, 22);
+    }
+    const { data } = ctx.getImageData(0, 0, W, H);
+    const palette = quantize(data, 256, { format: fmt });
+    const index = applyPalette(data, palette, fmt);
+    const delay = i === frames.length - 1 ? 2500 : f.label ? 1300 : 900;
+    gif.writeFrame(index, W, H, { palette, delay });
+  }
+  gif.finish();
+  const b64 = await blobToB64(new Blob([gif.bytes()], { type: 'image/gif' }));
+  const name = a.filename || `recording-${Date.now()}.gif`;
+  const info = `GIF: ${frames.length} frames, ${W}x${H}, ${Math.round((b64.length * 3) / 4 / 1024)} KB`;
+  if (a.drop) return `${info}\n${await dropFile(a.drop, b64, 'image/gif', name)}`;
+  if (a.download) {
+    const id = await chrome.downloads.download({ url: `data:image/gif;base64,${b64}`, filename: name, saveAs: false, conflictAction: 'uniquify' });
+    return `${info}\ndownloaded: ${fmtDl(await waitDownload(id, 60000))}`;
+  }
+  return { text: info, file: { data: b64, ext: 'gif' } };
 };
 
 // =====================================================================

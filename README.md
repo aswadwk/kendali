@@ -33,27 +33,31 @@ Several clients can run at the same time. The first one becomes the hub, and the
 
 ## Tools
 
+Tool names and parameters match **Claude in Chrome** (`mcp__claude-in-chrome__*`): the same calls work here, and Kendali adds a few extra tools.
+
 | Tool | What it does |
 |---|---|
-| `tabs_context`, `tabs_create`, `tabs_close`, `tabs_switch` | Tab management |
-| `navigate` | URL, `back`, `forward`, `reload` (waits for load) |
-| `read_page` | Compact snapshot with `[ref]` numbers (viewport or `scope:"all"`, `diff:true`) |
-| `find`, `get_page_text` | Search the page, read text (paginated) |
-| `act` | click / hover / type / fill / select / check / press / scroll by ref, selector or text; `trusted:true` sends real input |
+| `tabs_context_mcp`, `tabs_create_mcp`, `tabs_close_mcp`, `tabs_switch` | Agent tabs live in a green **Kendali** tab group, and the user's own tabs are listed separately. `createIfEmpty:true` opens a window when the group is empty |
+| `navigate` | URL, `back`, `forward`, `reload` (waits for load). With no `tabId` it uses the group tab |
+| `read_page` | Snapshot with `[ref_N]` refs. Options: `filter:"interactive"\|"all"`, `ref_id` (subtree), `depth`, `max_chars`, plus `scope:"all"` and `diff:true` |
+| `find` | Natural-language search (`"search bar"`, `"login button"`). Returns at most 20 refs |
+| `get_page_text` | Read the article or page text (paginated) |
+| `computer` | `screenshot` (`scale`), `zoom`, left/right/double/triple click, drag, `type`, `key`, `scroll`, `scroll_to`, `hover`, `wait`, by `coordinate` or `ref`. Screenshots return an `imageId` |
 | `form_input` | Set a field by ref (text, select, checkbox) |
-| `computer` | Screenshot / zoom / clicks / drag / type / key combos / scroll by coordinate or ref; `save_to` writes the image to a file |
-| `wait_for` | Wait for text or a selector, or N seconds |
-| `javascript_tool` | Run JS in the page (bypasses CSP, top-level await) |
-| `read_console_messages`, `read_network_requests` | Console logs, network list, and response bodies (`request_id`) |
-| `handle_dialog` | Accept or dismiss alert/confirm/prompt |
-| `file_upload` | Put local files into `<input type=file>` |
-| `download`, `downloads` | Download a URL with the browser's cookies; list/wait/cancel/pause/resume downloads |
-| `save_pdf` | Print the page to PDF |
-| `cookies`, `history` | Read and edit cookies, search history |
+| `act`, `wait_for` | Extras: high-level click/type/select by ref, selector or text with a diff result; wait for text or a selector |
+| `javascript_tool` | `{action:"javascript_exec", text}` (also `code`). Bypasses CSP, supports top-level await |
+| `read_console_messages`, `read_network_requests` | `onlyErrors`, `pattern`, `urlPattern`, `limit`, `clear`. Response bodies via `request_id` (extra) |
+| `file_upload`, `upload_image` | Local files into `<input type=file>`; a screenshot (`imageId`) into a file input or dropped at a `coordinate` |
+| `gif_creator` | `start_recording` / `stop_recording` / `export` / `clear`. The GIF includes click indicators, action labels and a progress bar |
 | `resize_window` | Resize the window |
-| `browser_batch` | Run several tools in one call |
+| `list_connected_browsers`, `select_browser`, `switch_browser` | Multi-browser. `switch_browser` opens a "Connect" window in every browser |
+| `handle_dialog`, `download`, `downloads`, `save_pdf`, `cookies`, `history` | Extras not in Claude in Chrome |
+| `browser_batch` | Several tools in one call (`{name, input}` or `{tool, args}`; the `mcp__…__` prefix is accepted) |
 
-Text-only models can work with refs alone (`read_page` → `act`). Vision models can also use `computer` screenshots, where coordinates map 1:1 to clicks.
+Text-only models can work with refs alone (`read_page` → `computer {ref}` / `form_input`). Vision models can also use screenshots, where coordinates map 1:1 to clicks.
+
+### Multiple browsers
+Install the extension in every Chrome you want to control (other profiles, Chrome Beta, a second machine via port-forward). Each one shows up in `list_connected_browsers`, and you can rename it from the extension popup. When more than one is connected, every MCP session must call `select_browser` (or `switch_browser`) before anything else. Each session keeps its own choice.
 
 ## Config
 - `KENDALI_PORT` (default `18765`). If you change it, set the same port in the extension popup.

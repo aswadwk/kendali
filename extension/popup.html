@@ -12,10 +12,14 @@
   input { flex: 1; padding: 4px 6px; }
   button { padding: 4px 10px; }
   p { color: #666; font-size: 12px; margin: 10px 0 0; }
+  .id { color: #888; font-size: 11px; margin: 4px 0 10px; word-break: break-all; }
 </style>
 </head>
 <body>
   <div class="st" id="st"><span class="dot"></span><span id="txt">…</span></div>
+  <label for="name">Browser name (shown to MCP clients)</label>
+  <div class="row"><input id="name" maxlength="60"><button id="saveName">Save</button></div>
+  <div class="id" id="dev"></div>
   <label for="port">MCP server port</label>
   <div class="row"><input id="port" type="number" min="1" max="65535"><button id="save">Save</button></div>
   <p>Run <code>kendali-mcp</code> from your MCP client. The extension connects automatically.</p>

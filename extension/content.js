@@ -16,7 +16,7 @@
     return i;
   };
   const byRef = (r) => {
-    const el = refs.get(+r)?.deref();
+    const el = refs.get(+String(r).replace(/^ref_/, ''))?.deref();
     return el?.isConnected ? el : null;
   };
 
@@ -85,7 +85,7 @@
   }
 
   function describe(el, r) {
-    let s = `[${refOf(el)}] ${r}`;
+    let s = `[ref_${refOf(el)}] ${r}`;
     if (r === 'input' && el.tagName === 'INPUT' && el.type !== 'text') s += ':' + el.type;
     const n = name(el);
     if (n) s += ` "${n.replace(/"/g, "'")}"`;
@@ -137,10 +137,11 @@
   // ---- snapshot ----------------------------------------------------------
   function collect(o) {
     const out = [];
+    const els = [];
     const st = { above: 0, below: 0, n: 0 };
     const vh = innerHeight, vw = innerWidth;
 
-    const emit = (line) => { if (st.n < o.max) out.push(line); st.n++; };
+    const emit = (line, el = null) => { if (st.n < o.max) { out.push(line); els.push(el); } st.n++; };
 
     const inView = (rect) => {
       if (o.scope === 'all') return true;
@@ -149,7 +150,8 @@
       return rect.right > 0 && rect.left < vw;
     };
 
-    const visit = (el, pp) => {
+    const visit = (el, pp, d = 0) => {
+      if (o.depth && d > o.depth) return;
       if (SKIP.has(el.tagName) || el.getAttribute('aria-hidden') === 'true' || el.inert) return;
       if (!shown(el)) return;
 
@@ -159,17 +161,17 @@
 
       if (r) {
         const rect = sized(el);
-        if (rect && inView(rect)) emit(describe(el, r));
+        if (rect && inView(rect)) emit(describe(el, r), el);
         if (r !== 'list' && r !== 'combo') return; // don't descend into controls
       } else if (cursor && !pp) {
         const rect = sized(el);
         // big pointer containers (cards/body) aren't buttons; only list small ones
-        if (rect && rect.width * rect.height < vw * vh * 0.25 && inView(rect)) emit(describe(el, 'click'));
+        if (rect && rect.width * rect.height < vw * vh * 0.25 && inView(rect)) emit(describe(el, 'click'), el);
       } else if (HEAD[el.tagName] || el.getAttribute('role') === 'heading') {
         const rect = sized(el);
         if (rect && inView(rect)) {
           const t = clip(el.innerText, 80);
-          if (t) emit(`${HEAD[el.tagName] || '##'} ${t}`);
+          if (t) emit(`${HEAD[el.tagName] || '##'} ${t}`, el);
         }
         return;
       } else if (el.matches('dialog[open], [role=dialog], [role=alertdialog]')) {
@@ -180,21 +182,26 @@
         t = clip(t, 120);
         if (t.length > 2) {
           const rect = sized(el);
-          if (rect && inView(rect)) emit(`[${refOf(el)}] · ${t}`);
+          if (rect && inView(rect)) emit(`[ref_${refOf(el)}] · ${t}`, el);
         }
       }
 
       const isPtr = pp || cursor;
-      for (const c of el.children) visit(c, isPtr);
-      if (el.shadowRoot) for (const c of el.shadowRoot.children) visit(c, isPtr);
+      for (const c of el.children) visit(c, isPtr, d + 1);
+      if (el.shadowRoot) for (const c of el.shadowRoot.children) visit(c, isPtr, d + 1);
       if (el.tagName === 'IFRAME') {
-        try { const b = el.contentDocument?.body; if (b) visit(b, false); } catch { /* cross-origin */ }
+        try { const b = el.contentDocument?.body; if (b) visit(b, false, d + 1); } catch { /* cross-origin */ }
       }
     };
 
-    const modal = o.noModal ? null : modalRoot();
-    visit(modal || document.body, false);
-    return { out, st, modal: !!modal };
+    let root = null;
+    if (o.root != null) {
+      root = byRef(o.root);
+      if (!root) throw new Error(`ref_id ${o.root} not found (stale). Run read_page again.`);
+    }
+    const modal = o.noModal || root ? null : modalRoot();
+    visit(root || modal || document.body, false);
+    return { out, els, st, modal: !!modal };
   }
 
   function header() {
@@ -209,7 +216,7 @@
     const lines = out;
     let foot = [];
     if (modal) foot.push('(modal open: showing dialog only)');
-    if (st.n > o.max) foot.push(`(+${st.n - o.max} more lines cut; raise max)`);
+    if (st.n > o.max) foot.push(`(+${st.n - o.max} more lines cut; raise max_lines/max_chars, or focus with ref_id)`);
     if (st.below || st.above) foot.push(`(offscreen: ${st.above} above, ${st.below} below → scroll or scope:"all")`);
 
     if (o.diff && prev) {
@@ -222,7 +229,13 @@
       }
     }
     prev = lines;
-    return [header(), ...lines, ...foot].join('\n');
+    return cut([header(), ...lines, ...foot].join('\n'), o.maxChars);
+  }
+
+  function cut(txt, max) {
+    if (!max || txt.length <= max) return txt;
+    const at = txt.lastIndexOf('\n', max);
+    return txt.slice(0, at > 0 ? at : max) + `\n…(truncated: full output is ${txt.length} chars; pass a larger max_chars or focus with ref_id/depth)`;
   }
 
   function settle(quiet = 200, max = 1500) {
@@ -411,11 +424,57 @@
     return part + (rest > 0 ? `\n…(${rest} more chars; read offset:${off + max})` : '');
   }
 
+  // "find" by purpose or text: scores every element on the page against the query's words,
+  // with role synonyms ("search bar" → input, "login button" → btn) and attributes (id, name, placeholder…)
+  const ROLE_WORDS = {
+    button: 'btn', btn: 'btn', tombol: 'btn', link: 'link', tautan: 'link', anchor: 'link',
+    input: 'input', field: 'input', box: 'input', bar: 'input', textbox: 'input', textarea: 'input', kolom: 'input', search: 'input',
+    checkbox: 'cb', toggle: 'switch', switch: 'switch', radio: 'radio', dropdown: 'select', select: 'select', combobox: 'combo', picker: 'select',
+    menu: 'menu', tab: 'tab', slider: 'slider', upload: 'file', file: 'file', heading: '#', title: '#', judul: '#', option: 'opt',
+  };
+  const STOP = new Set(['the', 'a', 'an', 'of', 'to', 'for', 'in', 'on', 'at', 'with', 'and', 'or', 'that', 'this', 'which', 'containing',
+    'contains', 'called', 'named', 'labeled', 'labelled', 'element', 'elements', 'text', 'yang', 'di', 'ke', 'untuk', 'dan', 'atau', 'dengan']);
+  const SYN = { login: ['log in', 'sign in', 'masuk'], signin: ['sign in', 'log in'], signup: ['sign up', 'register', 'daftar'], logout: ['log out', 'sign out', 'keluar'],
+    cart: ['basket', 'keranjang', 'bag'], search: ['cari', 'find', 'query'], submit: ['send', 'kirim', 'save', 'simpan'], close: ['dismiss', 'tutup', '×', 'x'],
+    email: ['e-mail', 'mail'], password: ['kata sandi', 'pass'], next: ['continue', 'lanjut'], menu: ['hamburger', 'navigation'] };
+
+  function attrs(el) {
+    if (!el || el.nodeType !== 1) return '';
+    return [el.id, el.getAttribute('name'), el.getAttribute('placeholder'), el.getAttribute('type'), el.getAttribute('title'),
+      el.getAttribute('aria-label'), el.getAttribute('role'), el.getAttribute('data-testid'), el.getAttribute('href'),
+      typeof el.className === 'string' ? el.className : ''].filter(Boolean).join(' ').toLowerCase();
+  }
+
   function find(a) {
-    const q = String(a.q || '').toLowerCase();
-    const { out } = collect({ scope: 'all', text: true, max: 5000, noModal: true });
-    const hits = out.filter((l) => l.toLowerCase().includes(q));
-    return hits.length ? hits.slice(0, 25).join('\n') + (hits.length > 25 ? `\n(+${hits.length - 25} more)` : '') : `no match for "${a.q}"`;
+    const raw = String(a.q || '').trim();
+    const q = raw.toLowerCase();
+    const words = q.split(/[^\p{L}\p{N}@._-]+/u).filter((w) => w && !STOP.has(w));
+    const roles = new Set(words.map((w) => ROLE_WORDS[w.replace(/s$/, '')] || ROLE_WORDS[w]).filter(Boolean));
+    const { out, els } = collect({ scope: 'all', text: true, max: 8000, noModal: true });
+    const scored = [];
+    out.forEach((line, i) => {
+      const l = line.toLowerCase();
+      const at = attrs(els[i]);
+      const lineRole = (/\] (\S+)/.exec(line)?.[1] || (line.startsWith('#') ? '#' : '')).split(':')[0];
+      let sc = 0, hit = 0;
+      if (q && l.includes(q)) sc += 10;
+      for (const w of words) {
+        const alts = [w, ...(SYN[w] || [])];
+        if (alts.some((x) => l.includes(x))) { sc += 3; hit++; }
+        else if (alts.some((x) => at.includes(x))) { sc += 1.5; hit++; }
+      }
+      if (roles.size && roles.has(lineRole)) sc += 2.5;
+      if (/·/.test(line) && roles.size) sc -= 1; // plain text when an element type was asked for
+      if (sc > 0 && (hit || (roles.has(lineRole) && words.length <= 2))) scored.push([sc, i, line]);
+    });
+    if (!scored.length) return `no element matches "${raw}" (try other words, or read_page scope:"all")`;
+    scored.sort((x, y) => y[0] - x[0] || x[1] - y[1]);
+    const top = scored[0][0];
+    const good = scored.filter((x) => x[0] >= Math.min(top * 0.5, 4));
+    const shown = good.slice(0, 20);
+    let res = shown.map((x) => x[2]).join('\n');
+    if (good.length > 20) res += `\n(${good.length} matches — more than 20; use a more specific query)`;
+    return res;
   }
 
   async function wait(a) {
@@ -446,7 +505,31 @@
     return { tok, what: label(el), tag: el.tagName, type: el.type || '' };
   }
 
-  const OPS = { snap, act, read, find, wait, rect, mark };
+  // put a file into an <input type=file>, or drag-and-drop it onto an element / point
+  function drop(a) {
+    const el = a.x != null ? document.elementFromPoint(a.x, a.y) : locate(a);
+    if (!el) throw new Error(`nothing at (${a.x},${a.y})`);
+    const bin = atob(a.b64);
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    const file = new File([u8], a.name || 'image.png', { type: a.mime || 'image/png' });
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    if (el.tagName === 'INPUT' && el.type === 'file') {
+      el.files = dt.files;
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { msg: `set ${file.name} (${u8.length} bytes) on ${label(el)}` };
+    }
+    const r = el.getBoundingClientRect();
+    const x = a.x ?? r.left + r.width / 2, y = a.y ?? r.top + r.height / 2;
+    for (const t of ['dragenter', 'dragover', 'drop']) {
+      el.dispatchEvent(new DragEvent(t, { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, dataTransfer: dt }));
+    }
+    return { msg: `dropped ${file.name} (${u8.length} bytes) onto ${label(el)} at (${Math.round(x)},${Math.round(y)})` };
+  }
+
+  const OPS = { snap, act, read, find, wait, rect, mark, drop };
   globalThis.__kd = async (op, a) => {
     try { return await OPS[op](a || {}); } catch (e) { return { __err: e.message || String(e) }; }
   };
