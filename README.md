@@ -8,30 +8,33 @@ MCP client ──stdio──▶ mcp-server (Node) ──ws://127.0.0.1:18765─�
 
 ## Install
 
-1. **Extension**: install **Kendali – Browser MCP** from the Chrome Web Store. To use the source instead: open `chrome://extensions`, turn on *Developer mode*, click *Load unpacked*, and pick the `extension/` folder.
-2. **Register the MCP server in your AI client.** It is published on npm as [`kendali-mcp`](https://www.npmjs.com/package/kendali-mcp), so the client runs it with `npx` and you install nothing yourself (Node 18+). The extension connects automatically (badge shows **ON**).
+1. **Get the code**: `git clone https://github.com/aswadwk/kendali.git && cd kendali/mcp-server && npm install` (Node 18+).
+2. **Extension**: open `chrome://extensions`, turn on *Developer mode*, click *Load unpacked*, and pick the `extension/` folder. Do the same in every Chrome profile or browser you want to control.
+3. **Register the MCP server in your AI client** (examples below, replace `/path/to/kendali` with your clone). The client starts the server itself, and the extension connects automatically (badge shows **ON**).
 
 ### Claude Code
 ```bash
-claude mcp add kendali -- npx -y kendali-mcp
+claude mcp add kendali -- node /path/to/kendali/mcp-server/index.js
 ```
 
 ### Codex CLI (`~/.codex/config.toml`)
 ```toml
 [mcp_servers.kendali]
-command = "npx"
-args = ["-y", "kendali-mcp"]
+command = "node"
+args = ["/path/to/kendali/mcp-server/index.js"]
 ```
 
 ### OpenCode (`~/.config/opencode/opencode.json`)
 ```json
-{ "mcp": { "kendali": { "type": "local", "command": ["npx", "-y", "kendali-mcp"], "enabled": true } } }
+{ "mcp": { "kendali": { "type": "local", "command": ["node", "/path/to/kendali/mcp-server/index.js"], "enabled": true } } }
 ```
 
 ### Gemini CLI / Cursor / VS Code / Cline / LM Studio (JSON)
 ```json
-{ "mcpServers": { "kendali": { "command": "npx", "args": ["-y", "kendali-mcp"] } } }
+{ "mcpServers": { "kendali": { "command": "node", "args": ["/path/to/kendali/mcp-server/index.js"] } } }
 ```
+
+After `git pull`, reload the extension at `chrome://extensions` and restart your MCP client.
 
 ### Agent skill (optional)
 `skills/kendali-browser/SKILL.md` teaches a model the workflow. Copy it into your client's skills folder (for example `~/.claude/skills/kendali-browser/`).
