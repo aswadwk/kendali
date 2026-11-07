@@ -1,0 +1,24 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css"><style>
+.wrap { padding: 48px 64px; display: flex; flex-direction: column; justify-content: center; gap: 34px; height: 100%; }
+h1 { font-size: 44px; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.card { background: rgba(255,255,255,.055); border: 1px solid rgba(255,255,255,.09); border-radius: 14px; padding: 26px 24px; min-height: 168px; }
+.card b { display: block; font-size: 21px; margin-bottom: 6px; color: #fff; }
+.card p { color: #b9cbbf; font-size: 16.5px; line-height: 1.45; }
+.card .mono { color: #4fd788; font-size: 13.5px; margin-top: 12px; display: block; }
+.clients { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.clients span { background: rgba(79,215,136,.12); border: 1px solid rgba(79,215,136,.35); color: #c9f2d9; border-radius: 999px; padding: 6px 14px; font-size: 15px; }
+.lbl { color: #8fa497; font-size: 15px; margin-right: 6px; }
+</style></head><body><div class="wrap">
+  <div class="brand"><img src="icon.png">Kendali – Browser MCP</div>
+  <h1>Everything an agent needs in a browser</h1>
+  <div class="grid">
+    <div class="card"><b>Read pages</b><p>Compact snapshots with element refs, so text-only models can browse too.</p><span class="mono">read_page · find · get_page_text</span></div>
+    <div class="card"><b>Interact</b><p>Click, type, key combos, scroll and drag by ref or by coordinate.</p><span class="mono">computer · form_input</span></div>
+    <div class="card"><b>See</b><p>Screenshots with zoom and scaling, and GIF recordings of every step.</p><span class="mono">computer · gif_creator</span></div>
+    <div class="card"><b>Files</b><p>Upload files and screenshots, download with your session, save as PDF.</p><span class="mono">file_upload · upload_image · download</span></div>
+    <div class="card"><b>Debug</b><p>Run JavaScript, read console messages, network requests and API responses.</p><span class="mono">javascript_tool · read_network_requests</span></div>
+    <div class="card"><b>Stay organized</b><p>Agent tabs live in their own tab group. Control several browsers at once.</p><span class="mono">tabs_context_mcp · select_browser</span></div>
+  </div>
+  <div class="clients"><span class="lbl">Works with</span><span>Claude Code</span><span>Codex CLI</span><span>Gemini CLI</span><span>Cursor</span><span>VS Code</span><span>OpenCode</span><span>Cline</span><span>LM Studio</span><span>any MCP client</span></div>
+</div></body></html>

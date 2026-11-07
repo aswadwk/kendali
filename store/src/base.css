@@ -1,0 +1,9 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { width: 1280px; height: 800px; overflow: hidden; font-family: -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif;
+  background: radial-gradient(1200px 700px at 85% -10%, #1d6b3f 0%, #0f2a1c 45%, #0a1410 100%); color: #f2f5f3; }
+.mono { font-family: "SF Mono", Menlo, monospace; }
+.brand { display: flex; align-items: center; gap: 14px; font-weight: 700; font-size: 22px; letter-spacing: .2px; }
+.brand img { width: 40px; height: 40px; }
+h1 { font-size: 50px; line-height: 1.08; font-weight: 800; letter-spacing: -1px; }
+.sub { color: #b9cbbf; font-size: 21px; line-height: 1.45; }
+.green { color: #4fd788; }

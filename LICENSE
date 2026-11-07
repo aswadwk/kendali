@@ -1,0 +1,9 @@
+Copyright (c) 2026 aswadwk. All rights reserved.
+
+This repository is published for viewing and for installing Kendali through the
+Chrome Web Store and npm. No license is granted to copy, modify, or redistribute
+the source code without written permission from the copyright holder.
+
+Third-party code keeps its own license:
+- extension/lib/gifenc.esm.js: gifenc by Matt DesLauriers, MIT License
+  (see extension/lib/gifenc.LICENSE.md).

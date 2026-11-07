@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kendali Privacy Policy</title>
+<style>
+  :root { --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --accent: #16964b; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --accent: #3fb96f; } }
+  body { background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, sans-serif; margin: 0; padding: 32px 16px; }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 28px; margin: 0 0 4px; } h2 { font-size: 19px; margin-top: 32px; }
+  .muted { color: var(--muted); } a { color: var(--accent); }
+  code { font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Kendali – Browser MCP: Privacy Policy</h1>
+<p class="muted">Last updated: 7 November 2026</p>
+
+<p>Kendali is a Chrome extension that lets an AI agent running on <strong>your own computer</strong> control your browser through the Model Context Protocol (MCP). This policy explains what the extension can access and where that data goes.</p>
+
+<h2>Summary</h2>
+<ul>
+  <li>Kendali has <strong>no server, no account, no analytics and no tracking</strong>. The developer receives none of your data.</li>
+  <li>The extension communicates only with the Kendali MCP server on <code>127.0.0.1</code> (your own machine).</li>
+  <li>It reads or changes a page only when an MCP client you configured asks it to.</li>
+</ul>
+
+<h2>What the extension can access</h2>
+<p>To carry out the commands of your local AI agent, the extension can, <em>on request</em>:</p>
+<ul>
+  <li><strong>Website content</strong>: page text, links, form fields, screenshots, console messages and network requests of the tabs it controls;</li>
+  <li><strong>Browsing activity</strong>: tab titles and URLs, and browsing history when the agent searches it;</li>
+  <li><strong>Cookies</strong> for a site, when the agent lists, sets or removes them;</li>
+  <li><strong>Downloads</strong> it starts or monitors, saved to your computer;</li>
+  <li><strong>Data you type</strong> or that the agent enters into web forms.</li>
+</ul>
+
+<h2>Where the data goes</h2>
+<p>All of the above is sent only over a WebSocket to <code>ws://127.0.0.1</code>, the Kendali MCP server running on your computer. That server passes the results to the MCP client (AI application) you configured, such as Claude Code, Codex, Gemini CLI, Cursor or OpenCode.</p>
+<p><strong>Your AI client may send this data to its model provider</strong> (for example Anthropic, OpenAI or Google) as part of the conversation. That transfer is governed by the AI client's and model provider's own privacy policies, not by Kendali. Use Kendali only with AI clients and models you trust.</p>
+
+<h2>What is stored</h2>
+<p>The extension stores only its settings in Chrome's local storage: a random device ID, the browser name you choose and the MCP server port. During a session it also keeps temporary state (its tab group and last-used tab), which is cleared when the browser closes. Screenshots, GIF recordings, PDFs and downloads are saved to your own disk only when the agent asks for them.</p>
+
+<h2>Sharing and sale</h2>
+<p>The developer does not collect, sell, rent or share any user data, and does not use it for advertising, creditworthiness or any purpose other than the extension's single function: letting your local AI agent control your browser.</p>
+
+<h2>Security</h2>
+<p>The local server listens only on <code>127.0.0.1</code> and rejects connections from web pages. Pages can contain instructions written to mislead AI agents (prompt injection), so review what your agent does in your logged-in browser.</p>
+
+<h2>Contact</h2>
+<p>Questions or requests: open an issue at <a href="https://github.com/aswadwk/kendali/issues">github.com/aswadwk/kendali/issues</a>.</p>
+</main>
+</body>
+</html>

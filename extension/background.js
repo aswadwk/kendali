@@ -121,7 +121,11 @@ async function onMessage(sock, raw) {
 chrome.alarms.create('kendali-keepalive', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(() => connect());
 chrome.runtime.onStartup.addListener(() => connect());
-chrome.runtime.onInstalled.addListener(() => connect());
+chrome.runtime.onInstalled.addListener((d) => {
+  connect();
+  // first install from the store: show how to add the MCP server to an AI client
+  if (d.reason === 'install') chrome.tabs.create({ url: 'https://github.com/aswadwk/kendali#install' }).catch(() => {});
+});
 chrome.runtime.onMessage.addListener((msg, _s, send) => {
   if (msg?.type === 'status') {
     Promise.all([getPort(), identity()]).then(([port, id]) => send({ connected, port, ...id }));

@@ -8,26 +8,33 @@ MCP client ──stdio──▶ mcp-server (Node) ──ws://127.0.0.1:18765─�
 
 ## Install
 
-1. **Extension**: open `chrome://extensions`, turn on *Developer mode*, click *Load unpacked*, and pick the `extension/` folder.
-2. **Server**: run `cd mcp-server && npm install`.
-3. **Register it in your MCP client** (examples below). The client starts the server itself, and the extension connects automatically (badge shows **ON**).
+1. **Extension**: install **Kendali – Browser MCP** from the Chrome Web Store. To use the source instead: open `chrome://extensions`, turn on *Developer mode*, click *Load unpacked*, and pick the `extension/` folder.
+2. **Register the MCP server in your AI client.** It is published on npm as [`kendali-mcp`](https://www.npmjs.com/package/kendali-mcp), so the client runs it with `npx` and you install nothing yourself (Node 18+). The extension connects automatically (badge shows **ON**).
 
 ### Claude Code
 ```bash
-claude mcp add kendali -- node /Users/aswad/Development/aswad/chrome-ext/mcp-server/index.js
+claude mcp add kendali -- npx -y kendali-mcp
 ```
 
 ### Codex CLI (`~/.codex/config.toml`)
 ```toml
 [mcp_servers.kendali]
-command = "node"
-args = ["/Users/aswad/Development/aswad/chrome-ext/mcp-server/index.js"]
+command = "npx"
+args = ["-y", "kendali-mcp"]
+```
+
+### OpenCode (`~/.config/opencode/opencode.json`)
+```json
+{ "mcp": { "kendali": { "type": "local", "command": ["npx", "-y", "kendali-mcp"], "enabled": true } } }
 ```
 
 ### Gemini CLI / Cursor / VS Code / Cline / LM Studio (JSON)
 ```json
-{ "mcpServers": { "kendali": { "command": "node", "args": ["/Users/aswad/Development/aswad/chrome-ext/mcp-server/index.js"] } } }
+{ "mcpServers": { "kendali": { "command": "npx", "args": ["-y", "kendali-mcp"] } } }
 ```
+
+### Agent skill (optional)
+`skills/kendali-browser/SKILL.md` teaches a model the workflow. Copy it into your client's skills folder (for example `~/.claude/skills/kendali-browser/`).
 
 Several clients can run at the same time. The first one becomes the hub, and the others relay through it. If the hub exits, another client takes over.
 
@@ -68,3 +75,9 @@ Install the extension in every Chrome you want to control (other profiles, Chrom
 - The server binds to `127.0.0.1` only. Connections from web pages are refused (Origin check).
 - The agent drives your **logged-in** browser, and page content can contain prompt injection. Use it with models and tasks you trust.
 - Tools that use the DevTools protocol show Chrome's "is debugging this browser" bar. This is expected.
+
+## Privacy
+Kendali has no backend. It talks only to the MCP server on your own machine (`127.0.0.1`), and nothing is sent anywhere else. See the [privacy policy](https://aswadwk.github.io/kendali/privacy.html).
+
+## License
+Copyright © 2026 aswadwk. All rights reserved (see [LICENSE](LICENSE)). The bundled gifenc library is MIT.

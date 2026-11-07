@@ -1,17 +1,41 @@
 {
   "name": "kendali-mcp",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "version": "0.2.0",
+  "description": "MCP server for the Kendali Chrome extension: lets any AI agent (Claude Code, Codex, Gemini CLI, Cursor, OpenCode\u2026) control your Chrome browser with Claude-in-Chrome compatible tools.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "chrome",
+    "browser",
+    "browser-automation",
+    "ai-agent",
+    "claude",
+    "codex"
+  ],
+  "author": "aswadwk",
+  "license": "UNLICENSED",
+  "homepage": "https://github.com/aswadwk/kendali#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aswadwk/kendali.git",
+    "directory": "mcp-server"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/aswadwk/kendali/issues"
+  },
   "type": "module",
   "bin": {
     "kendali-mcp": "index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

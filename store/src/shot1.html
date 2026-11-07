@@ -1,0 +1,46 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css"><style>
+.wrap { display: grid; grid-template-columns: 430px 1fr; gap: 40px; padding: 56px 56px 0; height: 100%; }
+.left { display: flex; flex-direction: column; gap: 26px; padding-top: 10px; }
+.steps { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
+.step { display: flex; gap: 12px; font-size: 17px; color: #d6e2da; line-height: 1.4; }
+.n { flex: none; width: 26px; height: 26px; border-radius: 50%; background: #1f9d55; color: #fff; font-weight: 700; font-size: 14px; display: grid; place-items: center; }
+code { background: rgba(255,255,255,.08); padding: 1px 6px; border-radius: 5px; font-size: 15px; }
+.term { background: #0b0f0d; border: 1px solid rgba(255,255,255,.1); border-radius: 14px; box-shadow: 0 30px 80px rgba(0,0,0,.55); overflow: hidden; height: 690px; }
+.bar { height: 38px; background: #161b18; display: flex; align-items: center; gap: 8px; padding: 0 14px; border-bottom: 1px solid rgba(255,255,255,.06); }
+.bar i { width: 12px; height: 12px; border-radius: 50%; display: block; } .bar span { margin-left: 12px; color: #8a978f; font-size: 13px; }
+.body { padding: 18px 22px; font-size: 14.2px; line-height: 1.62; color: #cfd8d2; white-space: pre; }
+.u { color: #fff; font-weight: 600; } .t { color: #4fd788; } .d { color: #7d8a82; } .r { color: #e9c46a; }
+</style></head><body><div class="wrap">
+<div class="left">
+  <div class="brand"><img src="icon.png">Kendali – Browser MCP</div>
+  <h1>Let any AI agent<br>drive your <span class="green">Chrome</span></h1>
+  <p class="sub">Claude Code, Codex, Gemini CLI, Cursor, OpenCode… one local MCP server, tools that match Claude&nbsp;in&nbsp;Chrome.</p>
+  <div class="steps">
+    <div class="step"><span class="n">1</span><span>Install this extension</span></div>
+    <div class="step"><span class="n">2</span><span>Add <code class="mono">npx -y kendali-mcp</code> to your AI client</span></div>
+    <div class="step"><span class="n">3</span><span>Ask your agent to browse</span></div>
+  </div>
+</div>
+<div class="term"><div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="mono">agent — kendali</span></div>
+<div class="body mono"><span class="u">&gt; Fill the signup form on the test page and submit it</span>
+
+<span class="t">● kendali · tabs_context_mcp</span> <span class="d">{createIfEmpty: true}</span>
+  <span class="d">Kendali tab group (1 tab) — yours to use</span>
+<span class="t">● kendali · navigate</span> <span class="d">{url: "localhost:3000/signup"}</span>
+<span class="t">● kendali · read_page</span> <span class="d">{filter: "interactive"}</span>
+  # Create account
+  <span class="r">[ref_1]</span> input "Name"
+  <span class="r">[ref_2]</span> input "Email"
+  <span class="r">[ref_3]</span> select ="Plan" {Free|Pro}
+  <span class="r">[ref_4]</span> cb "I agree to the terms"
+  <span class="r">[ref_5]</span> btn "Sign up"
+<span class="t">● kendali · browser_batch</span> <span class="d">4 actions</span>
+  form_input ref_1 ok · form_input ref_2 ok
+  form_input ref_3 ok · form_input ref_4 ok
+<span class="t">● kendali · computer</span> <span class="d">{action: "left_click", ref: "ref_5"}</span>
+<span class="t">● kendali · wait_for</span> <span class="d">{text: "Welcome"}</span>
+  ok: "Welcome" present
+<span class="t">● kendali · computer</span> <span class="d">{action: "screenshot"}</span>
+
+<span class="u">Done: the account was created and the dashboard shows "Welcome".</span></div></div>
+</div></body></html>
