@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Kendali – Browser MCP",
+  "version": "0.1.0",
+  "description": "Lets any MCP client (Claude Code, Codex, Gemini CLI, Cursor, LM Studio…) control this browser.",
+  "minimum_chrome_version": "120",
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Kendali", "default_popup": "popup.html" },
+  "permissions": [
+    "tabs",
+    "scripting",
+    "debugger",
+    "downloads",
+    "cookies",
+    "history",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": ["<all_urls>"]
+}

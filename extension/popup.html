@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 13px system-ui, sans-serif; width: 240px; margin: 12px; color: #111; }
+  .st { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 10px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #9ca3af; }
+  .on .dot { background: #16a34a; }
+  label { display: block; color: #555; margin-bottom: 4px; }
+  .row { display: flex; gap: 6px; }
+  input { flex: 1; padding: 4px 6px; }
+  button { padding: 4px 10px; }
+  p { color: #666; font-size: 12px; margin: 10px 0 0; }
+</style>
+</head>
+<body>
+  <div class="st" id="st"><span class="dot"></span><span id="txt">…</span></div>
+  <label for="port">MCP server port</label>
+  <div class="row"><input id="port" type="number" min="1" max="65535"><button id="save">Save</button></div>
+  <p>Run <code>kendali-mcp</code> from your MCP client. The extension connects automatically.</p>
+  <script src="popup.js"></script>
+</body>
+</html>
