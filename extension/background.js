@@ -580,8 +580,23 @@ T.wait_for = async (a) => {
     await sleep(Math.min(+a.seconds || 1, 60) * 1000);
     return `waited ${a.seconds || 1}s`;
   }
-  await page(tab.id, 'wait', { text: a.text, sel: a.selector, gone: !!a.gone, timeout: a.timeout || 10000 });
-  return `ok: ${a.selector || `"${a.text}"`} ${a.gone ? 'gone' : 'present'}`;
+  // Poll in short rounds from here, not in one long in-page loop: a navigation (form submit,
+  // redirect) destroys the page script, and the long call would never answer.
+  const what = `${a.selector || `"${a.text}"`}${a.gone ? ' to disappear' : ''}`;
+  const end = Date.now() + (a.timeout || 10000);
+  let last = '';
+  while (Date.now() < end) {
+    try {
+      await withTimeout(page(tab.id, 'wait', { text: a.text, sel: a.selector, gone: !!a.gone, timeout: 800 }), 3000, 'round timed out');
+      return `ok: ${a.selector || `"${a.text}"`} ${a.gone ? 'gone' : 'present'}`;
+    } catch (e) {
+      if (/dialog/.test(e.message)) throw e;
+      if (/cannot (access|control)|No tab with id/i.test(e.message)) throw e;
+      last = /^timeout waiting/.test(e.message) ? '' : e.message;
+      if (last) await sleep(250); // page navigating/loading: retry
+    }
+  }
+  throw new Error(`timeout waiting for ${what}${last ? ` (last error: ${last})` : ''}`);
 };
 
 async function doCdpAction(tabId, c) {

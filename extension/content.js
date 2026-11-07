@@ -490,10 +490,21 @@
     throw new Error(`timeout waiting for ${a.sel || `"${a.text}"`}${a.gone ? ' to disappear' : ''}`);
   }
 
-  function rect(a) {
+  // Scroll only when needed, then re-measure until the box stops moving: popovers/menus
+  // (e.g. GitHub's anchored overlays) reposition a frame or two after a scroll or open.
+  async function rect(a) {
     const el = locate(a);
-    el.scrollIntoView({ block: 'center', behavior: 'instant' });
-    const r = el.getBoundingClientRect();
+    const frame = () => new Promise((r) => requestAnimationFrame(() => r()));
+    let r = el.getBoundingClientRect();
+    const visible = r.width > 0 && r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth;
+    if (!visible) el.scrollIntoView({ block: 'center', behavior: 'instant' });
+    for (let i = 0; i < 10; i++) {
+      await Promise.race([frame(), sleep(50)]);
+      const n = el.getBoundingClientRect();
+      const same = Math.abs(n.left - r.left) < 1 && Math.abs(n.top - r.top) < 1 && Math.abs(n.width - r.width) < 1;
+      r = n;
+      if (same && i > 0) break;
+    }
     return { x: r.left, y: r.top, w: r.width, h: r.height, vw: innerWidth };
   }
 
