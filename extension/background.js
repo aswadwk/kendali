@@ -31,7 +31,20 @@ async function identity() {
   const pi = await chrome.runtime.getPlatformInfo();
   const os = { mac: 'macOS', win: 'Windows', linux: 'Linux', cros: 'ChromeOS', android: 'Android' }[pi.os] || pi.os;
   const brand = (navigator.userAgentData?.brands || []).map((b) => b.brand).find((b) => !/not|chromium/i.test(b)) || 'Chrome';
-  return { deviceId, name: deviceName || `${brand} on ${os} (${deviceId.slice(0, 4)})`, platform: os };
+  // the Google account signed in to this Chrome profile (needs identity + identity.email permissions)
+  const email = await new Promise((r) => {
+    try { chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, (u) => r(u?.email || '')); } catch { r(''); }
+  });
+  const label = deviceName || '';
+  const auto = `${brand} on ${os}${email ? ` — ${email}` : ` (${deviceId.slice(0, 4)})`}`;
+  return { deviceId, name: label || auto, label, email, platform: os };
+}
+
+// live details that help a user tell several profiles apart
+async function profileInfo() {
+  const [id, tabs, wins] = await Promise.all([identity(), chrome.tabs.query({}), chrome.windows.getAll({ windowTypes: ['normal'] })]);
+  const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+  return { ...id, tabs: tabs.length, windows: wins.length, activeTab: active ? `${(active.title || '').slice(0, 60)} | ${(active.url || '').slice(0, 100)}` : '' };
 }
 
 async function hello(s) {
@@ -456,8 +469,14 @@ const T = {};
 // Kendali keeps the tabs it opens in its own tab group (like Claude in Chrome's MCP group)
 async function getGroup() {
   const { kdGroup } = await chrome.storage.session.get('kdGroup').catch(() => ({}));
-  if (kdGroup == null) return null;
-  return chrome.tabGroups.get(kdGroup).then(() => kdGroup, () => null);
+  if (kdGroup != null && await chrome.tabGroups.get(kdGroup).then(() => true, () => false)) return kdGroup;
+  // session storage is wiped on a browser restart / extension reload, but Chrome may restore the
+  // "Kendali" group itself: adopt it instead of starting a second group (and a second window)
+  const found = await chrome.tabGroups.query({ title: 'Kendali' }).catch(() => []);
+  if (!found.length) return null;
+  const g = found.find((x) => x.color === 'green') || found[0];
+  await chrome.storage.session.set({ kdGroup: g.id }).catch(() => {});
+  return g.id;
 }
 async function groupTabs() {
   const g = await getGroup();
@@ -473,12 +492,23 @@ async function addToGroup(tabId) {
     return g;
   } catch { return null; } // e.g. popup windows can't hold groups
 }
+// a normal window of this (already open) profile: the last focused one, else any
+async function openWindow() {
+  return await chrome.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null)
+    || (await chrome.windows.getAll({ windowTypes: ['normal'] }).catch(() => []))[0] || null;
+}
+
 async function ensureGroupTab() {
   const tabs = await groupTabs();
   if (tabs.length) return tabs;
-  const w = await chrome.windows.create({ url: 'about:blank', focused: true });
-  await addToGroup(w.tabs[0].id);
-  await setLast(w.tabs[0].id);
+  // Chrome (this profile) is already open: add the tab to an existing window instead of
+  // opening another window of the same profile. Only create a window when none exists.
+  const win = await openWindow();
+  const tab = win
+    ? await chrome.tabs.create({ url: 'about:blank', active: true, windowId: win.id })
+    : (await chrome.windows.create({ url: 'about:blank', focused: true })).tabs[0];
+  await addToGroup(tab.id);
+  await setLast(tab.id);
   return groupTabs();
 }
 
@@ -505,7 +535,7 @@ T.tabs_create_mcp = async (a) => {
   const g = await getGroup();
   let windowId;
   if (g != null) windowId = (await chrome.tabGroups.get(g)).windowId;
-  else windowId = (await chrome.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null))?.id;
+  else windowId = (await openWindow())?.id;
   const t = await chrome.tabs.create({ url: a.url ? normUrl(a.url) : 'about:blank', active: a.active !== false, windowId });
   await addToGroup(t.id);
   await setLast(t.id);
@@ -570,38 +600,69 @@ T.read_page = async (a) => {
 
 T.find = async (a) => {
   const tab = await tabOf(a);
-  return page(tab.id, 'find', { q: a.query });
+  return page(tab.id, 'find', { q: a.query, limit: a.limit });
 };
 
 T.get_page_text = async (a) => {
   const tab = await tabOf(a);
-  return page(tab.id, 'read', { sel: a.selector, ref: a.ref, offset: a.offset, max: a.max_chars });
+  if (a.raw) return { text: `${tab.title} | ${tab.url}`, raw: await page(tab.id, 'read', { sel: a.selector, ref: a.ref, last: a.last, raw: true }) };
+  return page(tab.id, 'read', { sel: a.selector, ref: a.ref, last: a.last, offset: a.offset, max: a.max_chars });
 };
 
 T.wait_for = async (a) => {
   const tab = await tabOf(a);
+  if (a.stable) return waitStable(tab, a);
   if (a.text == null && a.selector == null) {
     await sleep(Math.min(+a.seconds || 1, 60) * 1000);
     return `waited ${a.seconds || 1}s`;
   }
   // Poll in short rounds from here, not in one long in-page loop: a navigation (form submit,
   // redirect) destroys the page script, and the long call would never answer.
-  const what = `${a.selector || `"${a.text}"`}${a.gone ? ' to disappear' : ''}`;
+  const name = a.selector || `"${a.text}"`;
   const end = Date.now() + (a.timeout || 10000);
-  let last = '';
-  while (Date.now() < end) {
-    try {
-      await withTimeout(page(tab.id, 'wait', { text: a.text, sel: a.selector, gone: !!a.gone, timeout: 800 }), 3000, 'round timed out');
-      return `ok: ${a.selector || `"${a.text}"`} ${a.gone ? 'gone' : 'present'}`;
-    } catch (e) {
-      if (/dialog/.test(e.message)) throw e;
-      if (/cannot (access|control)|No tab with id/i.test(e.message)) throw e;
-      last = /^timeout waiting/.test(e.message) ? '' : e.message;
-      if (last) await sleep(250); // page navigating/loading: retry
+  const round = async (gone) => {
+    let last = '';
+    while (Date.now() < end) {
+      try {
+        return await withTimeout(page(tab.id, 'wait', { text: a.text, sel: a.selector, gone, timeout: 800 }), 3000, 'round timed out');
+      } catch (e) {
+        if (/dialog/.test(e.message)) throw e;
+        if (/cannot (access|control)|No tab with id/i.test(e.message)) throw e;
+        last = /^timeout waiting/.test(e.message) ? '' : e.message;
+        if (last) await sleep(250); // page navigating/loading: retry
+      }
     }
+    throw new Error(`timeout waiting for ${name}${gone ? ' to disappear' : ' to appear'}${last ? ` (last error: ${last})` : ''}`);
+  };
+  if (!a.gone) { await round(false); return `ok: ${name} present`; }
+  if (a.appear_first) {
+    await round(false); // e.g. a "stop generating" button that shows up a moment after Send
+    await round(true);
+    return `ok: ${name} appeared, then gone`;
   }
-  throw new Error(`timeout waiting for ${what}${last ? ` (last error: ${last})` : ''}`);
+  const r = await round(true);
+  return r === 'absent'
+    ? `ok: ${name} not present — it was never seen (if it should show up first, use appear_first:true or stable:true)`
+    : `ok: ${name} gone`;
 };
+
+// wait until the text of an element (or the page) stops changing — for streaming AI chats
+async function waitStable(tab, a) {
+  const ms = Math.max(200, +a.stable_ms || 2000);
+  const end = Date.now() + (a.timeout || 60000);
+  let prev = null, since = Date.now(), changed = false;
+  while (Date.now() < end) {
+    const sig = await withTimeout(page(tab.id, 'sig', { sel: a.selector }), 3000, 'round timed out').catch(() => null);
+    if (sig != null && sig !== prev) {
+      if (prev != null) changed = true;
+      prev = sig; since = Date.now();
+    } else if (sig != null && Date.now() - since >= ms) {
+      return `ok: ${a.selector || 'page text'} stable for ${ms}ms${changed ? '' : ' (did not change while waiting)'} — ${sig.split(':')[0]} chars`;
+    }
+    await sleep(250);
+  }
+  throw new Error(`timeout: ${a.selector || 'page text'} still changing after ${a.timeout || 60000}ms`);
+}
 
 async function doCdpAction(tabId, c) {
   if (c.type === 'click') await click(tabId, c.x, c.y);
@@ -732,15 +793,25 @@ T.javascript_tool = async (a) => {
   const tab = await tabOf(a);
   dialogGuard(tab.id);
   const timeout = Math.min(+a.timeout_ms || 30000, 300000);
-  const r = await cdp(tab.id, 'Runtime.evaluate', {
-    expression: String(a.code ?? a.text ?? ''), awaitPromise: true, returnByValue: true, replMode: true, userGesture: true, allowUnsafeEvalBlockedByCSP: true,
-  }, timeout);
+  let r;
+  try {
+    r = await cdp(tab.id, 'Runtime.evaluate', {
+      expression: String(a.code ?? a.text ?? ''), awaitPromise: true, returnByValue: true, replMode: true, userGesture: true, allowUnsafeEvalBlockedByCSP: true,
+    }, timeout);
+  } catch (e) {
+    if (!/timed out/.test(e.message)) throw e;
+    // the script is NOT stopped: it keeps running in the page
+    return { text: `still running in the page after ${timeout}ms (not an error; the script was not stopped). ` +
+      'Do NOT run it again: if it stores its result (e.g. on window.*), read that later with a short javascript_tool call, ' +
+      'or rerun with a larger timeout_ms (max 300000).', running: true };
+  }
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
   const v = r.result || {};
   let s;
   if (v.type === 'undefined') s = 'undefined';
   else if ('value' in v) s = typeof v.value === 'string' ? v.value : JSON.stringify(v.value, null, 1);
   else s = v.description || v.type;
+  if (a.raw) return { text: '', raw: String(s) }; // save_to: the MCP server writes the full value to disk
   return clip(String(s), +a.max_chars || 20000);
 };
 
@@ -828,8 +899,22 @@ async function waitDownload(id, timeout) {
     await sleep(300);
   }
 }
+// why a page-triggered download may never appear: Chrome's "Automatic downloads" site setting
+async function autoDlHint(a) {
+  const tab = await tabOf(a).catch(() => null);
+  let setting = '';
+  if (tab?.url && /^https?:/.test(tab.url) && chrome.contentSettings?.automaticDownloads) {
+    setting = await chrome.contentSettings.automaticDownloads.get({ primaryUrl: tab.url }).then((x) => x.setting, () => '');
+  }
+  const site = tab?.url && /^https?:/.test(tab.url) ? new URL(tab.url).origin : 'this site';
+  if (setting === 'block') return `BLOCKED: Chrome blocks automatic (multiple) downloads for ${site}. Ask the user to allow "Automatic downloads" for it, or save without Chrome downloads: javascript_tool {save_to} or download {url}.`;
+  if (setting === 'ask') return `Possibly NEEDS PERMISSION: after the first download, Chrome asks before ${site} may download more files (look for a prompt in the address bar). Ask the user to allow it, or use javascript_tool {save_to} / download {url} instead.`;
+  return 'If the page triggered it, Chrome may be holding it back (multiple-downloads permission) or the click did not start one. Alternatives: javascript_tool {save_to} or download {url}.';
+}
+const dangerNote = (d) => d.state === 'in_progress' && d.danger && !['safe', 'accepted'].includes(d.danger)
+  ? ` — NEEDS USER CONFIRMATION in Chrome (flagged ${d.danger})` : d.paused ? ' — paused' : '';
 const fmtDl = (d) => `#${d.id} ${d.state}${d.error ? ' (' + d.error + ')' : ''} ${d.filename || '(pending)'} ← ${/^data:/.test(d.finalUrl || d.url) ? '(generated data)' : (d.finalUrl || d.url)}`.slice(0, 400)
-  + (d.state === 'in_progress' && d.totalBytes > 0 ? ` ${Math.round((100 * d.bytesReceived) / d.totalBytes)}%` : '');
+  + (d.state === 'in_progress' && d.totalBytes > 0 ? ` ${Math.round((100 * d.bytesReceived) / d.totalBytes)}%` : '') + dangerNote(d);
 
 T.download = async (a) => {
   const id = await chrome.downloads.download({
@@ -855,7 +940,7 @@ T.downloads = async (a) => {
       [d] = await chrome.downloads.search({ startedAfter: new Date(since).toISOString(), orderBy: ['-startTime'], limit: 1 });
       if (!d) await sleep(300);
     }
-    if (!d) throw new Error('no download started');
+    if (!d) throw new Error(`no download started within ${Math.round((a.timeout || 120000) / 1000)}s. ${await autoDlHint(a)}`);
     return fmtDl(await waitDownload(d.id, Math.max(1000, end - Date.now())));
   }
   const id = +a.id;
@@ -997,6 +1082,8 @@ T.gif_render = async (a) => {
 };
 
 // =====================================================================
+T.__info = () => profileInfo();
+
 async function run(tool, args) {
   const fn = T[tool];
   if (!fn) throw new Error(`unknown tool "${tool}"`);

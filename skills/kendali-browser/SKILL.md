@@ -35,22 +35,25 @@ Prefer refs over coordinates. Use `computer` only for canvas, maps, sliders, dra
 | List / open / close / focus tabs | `tabs_context_mcp {createIfEmpty?}`, `tabs_create_mcp {url?}`, `tabs_close_mcp {tabId}`, `tabs_switch {tabId}` |
 | Go to URL / back / forward / reload | `navigate {tabId, url}` (`url:"back"`, `"forward"`, `"reload"`) |
 | Interactive elements with refs | `read_page {tabId, filter?:"interactive"\|"all", ref_id?, depth?, max_chars?, diff?}` |
-| Find something anywhere on page | `find {tabId, query:"search bar"}` (natural language, at most 20 results) |
-| Read article / long text | `get_page_text {tabId, selector?, offset?, max_chars?}` (paginate with offset) |
+| Find something anywhere on page | `find {tabId, query:"search bar", limit?}` (natural language, best 5 by default, `limit` up to 20) |
+| Read article / long text | `get_page_text {tabId, selector?, last?, offset?, max_chars?}` (paginate with offset) |
+| Save page text to a local file | `get_page_text {tabId, selector?, last?, save_to:"/abs/out.txt"}` (full text, returns only path + preview) |
 | Click / hover / type / select / check / press key | `act {tabId, action, ref \| selector \| text, value?, key?, submit?}` |
 | Set a field (text, select, checkbox) | `form_input {tabId, ref, value}` (`value:true/false` for checkboxes) |
-| Wait for content | `wait_for {tabId, text \| selector, gone?, timeout?}` or `{seconds}` |
+| Fill a field from a local file (long prompt) | `form_input {tabId, ref, value_from_file:"/abs/prompt.txt"}` (works in contenteditable/ProseMirror; also `act {action:"type", value_from_file}`) |
+| Wait for content | `wait_for {tabId, text \| selector, gone?, appear_first?, timeout?}` or `{seconds}`; streaming AI chat: `wait_for {selector, stable:true, stable_ms?}` (text stops changing) |
 | Screenshot / zoom | `computer {action:"screenshot", scale?}` (returns `imageId`), `computer {action:"zoom", region:[x0,y0,x1,y1]}` |
 | Mouse/keyboard by coordinates | `computer {action:"left_click", coordinate:[x,y]}` (also `ref` instead of coordinate), `double_click`, `right_click`, `left_click_drag {start_coordinate, coordinate}`, `scroll {scroll_direction, scroll_amount}` |
 | Type at the focused element / key combos | `computer {action:"type", text}`, `computer {action:"key", text:"ctrl+a Backspace"}` (`cmd` on macOS, space-separated sequence, `repeat`) |
-| Run JS in the page | `javascript_tool {tabId, action:"javascript_exec", text}` (`code` also accepted; top-level `await` works; last expression is returned as JSON) |
+| Run JS in the page | `javascript_tool {tabId, action:"javascript_exec", text}` (`code`, or `code_file:"/abs/x.js"`; top-level `await` works; last expression is returned as JSON; `timeout_ms` default 30000, max 300000) |
+| Save a JS result to a local file | `javascript_tool {…, save_to:"/abs/out.json"}`; binary: return base64 or a data: URL and add `encoding:"base64"` |
 | Console errors | `read_console_messages {tabId, onlyErrors?, pattern?, limit?, clear?}` |
 | Network / API data | `read_network_requests {tabId, urlPattern?, types?:["XHR","Fetch"]}` → then `{request_id}` for the response body |
 | JS alert/confirm/prompt | `handle_dialog {tabId, accept?, prompt_text?}` |
 | Upload a file | `file_upload {tabId, ref, paths:["/abs/path"]}` (ref of the `file` input; find it with `find {query:"file upload"}`) |
 | Upload a screenshot | `upload_image {tabId, imageId, ref \| coordinate, filename?}` (file input, or drag-drop at a coordinate) |
 | Record a GIF of the steps | `gif_creator {action:"start_recording"}` → steps → `{action:"stop_recording"}` → `{action:"export", filename:"demo.gif"}` |
-| Several Chrome browsers | `list_connected_browsers`, `select_browser {deviceId}`, `switch_browser` (the user clicks Connect in the browser they want) |
+| Several Chrome browsers | `list_connected_browsers` (shows `email` of the Chrome profile, user `label`, tab count), `select_browser {deviceId}`, `switch_browser` (the user clicks Connect in the browser they want) |
 | Download a URL (with the user's cookies) | `download {url, filename?}` → returns the saved local path |
 | Download triggered by a click | `act {action:"click", …}` then `downloads {action:"wait"}` → returns the local path |
 | Save page as PDF | `save_pdf {tabId, path?}` |
@@ -69,9 +72,21 @@ Batch the fills and click with `browser_batch` when refs are known.
 
 **Scrape data**: first try `read_network_requests {types:["XHR","Fetch"]}` and read the JSON body (clean, complete). Otherwise use `javascript_tool` returning an array/object, e.g. `[...document.querySelectorAll('.item')].map(e => ({title: e.querySelector('h3')?.innerText, price: e.querySelector('.price')?.innerText}))`. For long text use `get_page_text` with pagination.
 
+**Ask an AI chat (ChatGPT, Gemini, …) and keep the answer**
+```
+form_input {ref:<prompt box>, value_from_file:"/abs/prompt.txt"}   # long prompts never pass through you
+→ act {action:"click", ref:<send>}
+→ wait_for {selector:"<message container>", stable:true, stable_ms:3000, timeout:180000}
+→ get_page_text {selector:"<message container>", last:true, save_to:"/abs/answer.md"}
+```
+Chat sites rename their selectors often: find the container of the newest reply with `read_page`/`javascript_tool` first. Without a stable selector, `wait_for {stable:true}` on the whole page works too, then cut `get_page_text` after the last "ChatGPT said" / model label. For a "stop" button use `wait_for {selector, gone:true, appear_first:true}`: plain `gone:true` returns at once when the button has not appeared yet.
+
 **Infinite scroll / long page**: `act {action:"scroll", dir:"down"}` or `computer {action:"scroll"}`, then `read_page {diff:true}` to see only new items.
 
 **Download**: a direct link means `download {url}`. A button that generates the file means click it, then `downloads {action:"wait"}`. Report the returned file path to the user.
+- **Cross-origin CDN / signed URLs** (e.g. a site's media on another domain): `fetch()` from `javascript_tool` usually fails CORS. Use `download {url}` (Chrome's cookies, no CORS), or `curl` the signed URL locally.
+- **Generated content** (blob, canvas, text built in the page): don't use `<a download>` (repeated ones get held back by Chrome's "automatic downloads" permission without any error). Return the data from `javascript_tool` with `save_to` (`encoding:"base64"` for binary).
+- If `downloads {action:"wait"}` finds nothing, its error says whether Chrome blocks or asks about automatic downloads for that site.
 
 **Debug a web app**: `navigate {url:"reload"}` → `read_console_messages {onlyErrors:true}` + `read_network_requests {only_failed:true}` → screenshot if layout matters.
 
@@ -86,6 +101,7 @@ Batch the fills and click with `browser_batch` when refs are known.
 - **"Chrome extension not connected"**: the user must open Chrome with the Kendali extension enabled (badge **ON**). Tell them; don't loop.
 - **"cannot control this tab"**: `chrome://` pages, the Chrome Web Store, and other extensions' pages are off-limits. Use a normal tab.
 - **Page still loading**: `wait_for {text|selector}` instead of fixed sleeps.
+- **`javascript_tool` says "still running"**: the script was not stopped and keeps going in the page. Don't rerun it. Store results on `window.*` and read them with a short call later, or raise `timeout_ms`.
 
 ## Rules
 

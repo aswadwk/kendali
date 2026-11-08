@@ -32,7 +32,10 @@
     "cookies",
     "history",
     "storage",
-    "alarms"
+    "alarms",
+    "identity",
+    "identity.email",
+    "contentSettings"
   ],
   "host_permissions": [
     "<all_urls>"

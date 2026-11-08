@@ -106,7 +106,7 @@ class Bridge {
       for (const [s, o] of this.exts) {
         if (o !== info && o.deviceId === deviceId) { this.exts.delete(s); s.close(4002, 'replaced by a newer connection'); }
       }
-      Object.assign(info, { deviceId, name: m.name || 'Chrome', platform: m.platform || '', version: m.version || '' });
+      Object.assign(info, { deviceId, name: m.name || 'Chrome', label: m.label || '', email: m.email || '', platform: m.platform || '', version: m.version || '' });
       log(`browser connected: ${info.name} [${deviceId}] v${info.version}`);
       return this.notify();
     }
@@ -195,18 +195,27 @@ class Bridge {
     await this.waitFor(() => this.ready()[0], 35000, NOT_CONNECTED);
     const all = this.ready();
     if (all.length > 1) {
-      throw new Error(`${all.length} browsers are connected (${all.map((i) => `${i.name} [${i.deviceId}]`).join(', ')}) and none is selected for this session. ` +
+      throw new Error(`${all.length} browsers are connected (${all.map((i) => `${i.name}${i.email && !i.name.includes(i.email) ? ` <${i.email}>` : ''} [${i.deviceId}]`).join(', ')}) and none is selected for this session. ` +
         'Call list_connected_browsers, ask the user which one to use, then select_browser {deviceId} (or switch_browser).');
     }
     return all[0];
   }
 
-  list(device) {
+  async list(device) {
     const all = this.ready();
-    return all.map((i) => ({
-      deviceId: i.deviceId, name: i.name, platform: i.platform, version: i.version,
-      isLocal: true, onThisComputer: true, // the hub only listens on 127.0.0.1
-      inUse: device ? i.deviceId === device : all.length === 1,
+    return Promise.all(all.map(async (i) => {
+      // live details (signed-in account, tab count, active tab); older extensions don't answer __info
+      const live = await this.send(i.sock, { tool: '__info', args: {}, timeout: 3000 }, 3000).catch(() => null);
+      if (live) Object.assign(i, { name: live.name || i.name, label: live.label || '', email: live.email || '' });
+      return {
+        deviceId: i.deviceId, name: i.name,
+        label: i.label || undefined, // set by the user in the extension popup
+        email: i.email || undefined, // Google account signed in to this Chrome profile
+        tabs: live?.tabs, windows: live?.windows, activeTab: live?.activeTab || undefined,
+        platform: i.platform, version: i.version,
+        isLocal: true, onThisComputer: true, // the hub only listens on 127.0.0.1
+        inUse: device ? i.deviceId === device : all.length === 1,
+      };
     }));
   }
 
@@ -259,11 +268,29 @@ async function saveFile(b64, ext, target) {
     await fs.mkdir(OUT_DIR, { recursive: true });
     file = path.join(OUT_DIR, `kendali-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`);
   } else {
-    file = path.resolve(OUT_DIR, file.replace(/^~(?=$|\/)/, os.homedir()));
+    file = resolveOut(file);
     await fs.mkdir(path.dirname(file), { recursive: true });
   }
   await fs.writeFile(file, Buffer.from(b64, 'base64'));
   return file;
+}
+
+const expandHome = (file) => String(file).replace(/^~(?=$|\/)/, os.homedir());
+const resolveOut = (file) => path.resolve(OUT_DIR, expandHome(file));
+
+// write text (or base64 when encoding:"base64") produced in the page straight to a local file
+async function saveText(content, target, encoding) {
+  const file = resolveOut(target);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const buf = encoding === 'base64' ? Buffer.from(String(content).replace(/^data:[^,]*,/, ''), 'base64') : Buffer.from(String(content), 'utf8');
+  await fs.writeFile(file, buf);
+  return { file, bytes: buf.length };
+}
+
+// read a local text file given in *_from_file parameters (so long text never goes through the model)
+async function readInput(file) {
+  const f = path.resolve(expandHome(file));
+  try { return await fs.readFile(f, 'utf8'); } catch (e) { throw new Error(`cannot read ${f}: ${e.code || e.message}`); }
 }
 
 // screenshots get an imageId so upload_image can reuse them (kept 10 minutes)
@@ -356,8 +383,9 @@ function register(name, description, shape, handler) {
 }
 
 // a tool executed by the extension
-function tool(name, description, shape, { after, timeout } = {}) {
+function tool(name, description, shape, { before, after, timeout } = {}) {
   register(name, description, shape, async (args) => {
+    if (before) args = await before(args);
     let r = await call(name, args, timeout ? timeout(args) : 45000);
     await recordFrame(name, args, r).catch((e) => log('gif frame failed:', e.message));
     if (after) r = await after(r, args);
@@ -366,10 +394,26 @@ function tool(name, description, shape, { after, timeout } = {}) {
 }
 const text = (t) => [{ type: 'text', text: t }];
 
+// save_to: ask the extension for the full raw value, write it here, return a short summary
+const saveToBefore = (a) => (a.save_to ? { ...a, raw: true } : a);
+const saveToAfter = async (r, a) => {
+  if (!a.save_to || r?.raw == null) return r;
+  const { file, bytes } = await saveText(r.raw, a.save_to, a.encoding);
+  const preview = a.encoding === 'base64' ? '' : `\npreview: ${r.raw.slice(0, 300).replace(/\s+/g, ' ')}${r.raw.length > 300 ? '…' : ''}`;
+  return { text: `${r.text ? r.text + '\n' : ''}saved ${r.raw.length} chars (${bytes} bytes) to ${file}${preview}` };
+};
+
+// value_from_file: the MCP server reads the file and passes its text as `value`
+const valueFromFile = async (a) => {
+  if (!a.value_from_file) return a;
+  const { value_from_file: f, ...rest } = a;
+  return { ...rest, value: await readInput(f), action_summary: a.action_summary || `Set field from ${path.basename(f)}` };
+};
+
 // ---- tabs & navigation ----
 tool('tabs_context_mcp',
   "List tabs: first those in Kendali's own tab group (yours to use), then the user's other tabs. Call this first. " +
-  'createIfEmpty:true creates a new window with a Kendali tab group if none exists. Each new task should use its own tab (tabs_create_mcp) unless the user points at an existing one.', {
+  'createIfEmpty:true adds a Kendali tab group tab to the already-open Chrome window if none exists (a new window only when Chrome has no window). Each new task should use its own tab (tabs_create_mcp) unless the user points at an existing one.', {
     createIfEmpty: z.boolean().optional(),
   });
 
@@ -411,28 +455,38 @@ tool('read_page',
   });
 
 tool('find',
-  'Find elements by purpose or text, e.g. "search bar", "login button", "price of the blue shirt". Searches the whole page (including offscreen) and returns up to 20 matching elements with refs. ' +
-  'If there are more than 20 matches you are told to be more specific.', {
+  'Find elements by purpose or text, e.g. "search bar", "login button", "price of the blue shirt". Searches the whole page (including offscreen) and returns the best matching elements with refs. ' +
+  'Returns the best `limit` matches (default 5, max 20) and says how many more exist.', {
     tabId,
     query: z.string(),
+    limit: z.number().int().optional().describe('Max results, default 5 (max 20)'),
   });
 
-tool('get_page_text', 'Extract plain text of the page, prioritising the main/article content (or a given element). Paginated with offset.', {
+tool('get_page_text', 'Extract plain text of the page, prioritising the main/article content (or a given element). Paginated with offset. ' +
+  'save_to writes the FULL text to a local file instead (no pagination, no 4000-char cap) and returns only the path, size and a short preview — use it to keep long answers (e.g. an AI chat reply) out of the context. ' +
+  'last:true with selector reads the last match (e.g. the newest chat message).', {
   tabId,
   selector: z.string().optional().describe('CSS selector of the element to read'),
+  last: z.boolean().optional().describe('With selector: use the last matching element'),
   ref: ref.optional(),
   offset: z.number().int().optional(),
   max_chars: z.number().int().optional().describe('Default 4000'),
-});
+  save_to: z.string().optional().describe(`Local file path to write the full text to (relative paths go under ${OUT_DIR})`),
+}, { before: saveToBefore, after: saveToAfter });
 
-tool('wait_for', 'Wait until text or a CSS selector appears (or disappears with gone:true), or just wait N seconds.', {
+tool('wait_for', 'Wait until text or a CSS selector appears (or disappears with gone:true), or just wait N seconds. ' +
+  'gone:true on something that was never there returns at once with "never seen" — add appear_first:true to wait for it to show up first. ' +
+  'stable:true waits until the text of `selector` (last match; default the whole page) stops changing for stable_ms — use it for streaming AI chat answers.', {
   tabId,
   text: z.string().optional(),
   selector: z.string().optional(),
   gone: z.boolean().optional(),
+  appear_first: z.boolean().optional().describe('With gone:true: wait for it to appear, then to disappear'),
+  stable: z.boolean().optional().describe('Wait until the text stops changing'),
+  stable_ms: z.number().optional().describe('With stable: quiet period in ms, default 2000'),
   seconds: z.number().optional(),
-  timeout: z.number().optional().describe('ms, default 10000'),
-}, { timeout: (a) => Math.max(a.timeout || 10000, (a.seconds || 0) * 1000) + 15000 });
+  timeout: z.number().optional().describe('ms, default 10000 (60000 with stable)'),
+}, { timeout: (a) => Math.max(a.timeout || (a.stable ? 60000 : 10000), (a.seconds || 0) * 1000) + 15000 });
 
 // ---- interacting ----
 tool('act',
@@ -445,6 +499,7 @@ tool('act',
     selector: z.string().optional(),
     text: z.string().optional().describe('Locate by visible text/label'),
     value: z.string().optional(),
+    value_from_file: z.string().optional().describe('type/fill: absolute path of a UTF-8 text file to use as value'),
     key: z.string().optional().describe('For press'),
     dir: z.enum(['up', 'down']).optional(),
     amount: z.number().optional().describe('Scroll pixels'),
@@ -453,14 +508,21 @@ tool('act',
     trusted: z.boolean().optional(),
     snapshot: z.boolean().optional().describe('Return snapshot diff after acting (default true)'),
     action_summary: summary,
-  });
+  }, { before: valueFromFile });
 
-tool('form_input', 'Set a form element value by ref: text inputs/textareas (string/number), <select> (option value or text), checkboxes/radios (boolean).', {
+tool('form_input', 'Set a form element value by ref: text inputs/textareas (string/number), <select> (option value or text), checkboxes/radios (boolean). ' +
+  'Rich editors (contenteditable, ProseMirror, Lexical) get the text via insertText. value_from_file reads the text from a local file (long prompts: no need to paste them into the call).', {
   tabId,
   ref: ref.optional(),
   selector: z.string().optional(),
-  value: z.union([z.string(), z.boolean(), z.number()]),
+  value: z.union([z.string(), z.boolean(), z.number()]).optional(),
+  value_from_file: z.string().optional().describe('Absolute path of a UTF-8 text file whose content becomes the value'),
   action_summary: summary,
+}, {
+  before: async (a) => {
+    if (a.value === undefined && !a.value_from_file) throw new Error('form_input needs value or value_from_file');
+    return valueFromFile(a);
+  },
 });
 
 tool('computer',
@@ -536,14 +598,23 @@ tool('handle_dialog', 'Accept or dismiss a JavaScript alert/confirm/prompt/befor
 // ---- dev tools ----
 tool('javascript_tool',
   'Execute JavaScript in the page (main world, bypasses CSP) with REPL semantics: top-level await works and the value of the last expression is returned (JSON). ' +
-  'Pass the code in `text` (with action:"javascript_exec") or in `code`.', {
+  'Pass the code in `text` (with action:"javascript_exec"), in `code`, or from a local file with `code_file`. ' +
+  'timeout_ms (default 30000, max 300000): on timeout the script keeps running in the page and you get "still running" — read its result later (e.g. from window.*), do not rerun it. ' +
+  'save_to writes the full result to a local file (no 20000-char cap, no Chrome downloads, no multiple-download prompt); with encoding:"base64" the result (base64 or a data: URL) is decoded to binary — e.g. `const b = await (await fetch(url)).blob(); await new Promise(r => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(b); })`.', {
     tabId,
     action: z.string().optional().describe('"javascript_exec"'),
     text: z.string().optional().describe('JavaScript code'),
     code: z.string().optional().describe('Alias of text'),
-    timeout_ms: z.number().optional(),
+    code_file: z.string().optional().describe('Absolute path of a .js file to run instead of text/code'),
+    timeout_ms: z.number().optional().describe('Default 30000, max 300000'),
     max_chars: z.number().int().optional(),
-  }, { timeout: (a) => (a.timeout_ms || 30000) + 15000 });
+    save_to: z.string().optional().describe(`Local file path to write the result to (relative paths go under ${OUT_DIR})`),
+    encoding: z.enum(['utf8', 'base64']).optional().describe('save_to: "base64" decodes the result to binary'),
+  }, {
+    timeout: (a) => Math.min(a.timeout_ms || 30000, 300000) + 15000,
+    before: async (a) => saveToBefore(a.code_file ? { ...a, code: await readInput(a.code_file), text: undefined } : a),
+    after: saveToAfter,
+  });
 
 tool('read_console_messages', 'Read console logs/errors/exceptions of a tab (tracking starts on the first call or first DevTools-based tool). Use pattern to filter.', {
   tabId,
@@ -592,7 +663,8 @@ tool('download', "Download a URL with Chrome's download manager (uses the browse
 }, { timeout: (a) => (a.timeout || 120000) + 15000 });
 
 tool('downloads',
-  'Manage downloads. action: list (recent, optional query), wait (wait for a download started in the last since_seconds — call right after clicking a download button — and return its file path), cancel/pause/resume/erase/show (id).', {
+  'Manage downloads. action: list (recent, optional query), wait (wait for a download started in the last since_seconds — call right after clicking a download button — and return its file path; ' +
+  'if none appears it says whether Chrome blocks or asks about automatic downloads for the site), cancel/pause/resume/erase/show (id).', {
     action: z.enum(['list', 'wait', 'cancel', 'pause', 'resume', 'erase', 'show']).optional(),
     id: z.number().int().optional(),
     query: z.string().optional(),
@@ -666,7 +738,8 @@ register('gif_creator',
 
 // ---- several browsers ----
 register('list_connected_browsers',
-  'List the Chrome browsers/profiles with the Kendali extension connected: deviceId, name, platform, isLocal, onThisComputer, inUse. ' +
+  'List the Chrome browsers/profiles with the Kendali extension connected: deviceId, name, label (set by the user in the extension popup), email (Google account of the profile), tabs/windows count, activeTab, platform, inUse. ' +
+  'Show the email/label to the user when asking which one to use. ' +
   'Not needed when only one browser is connected. If several are connected and none is selected, ask the user (AskUserQuestion-style: one option per browser, plus ' +
   '"Open a confirmation screen in every connected browser and let me select the right one there"), then call select_browser or switch_browser.', {},
 async () => {

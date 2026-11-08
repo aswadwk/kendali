@@ -69,6 +69,8 @@ Let a local AI agent (an MCP client on the user's own computer) control the brow
 | history | Let the agent search the user's browsing history when asked to find a previously visited page. |
 | storage | Store the extension's settings: the local server port, a random device ID and the browser name. |
 | alarms | Keep the connection to the local MCP server alive and reconnect when the server restarts. |
+| identity, identity.email | Read the email of the Google account signed in to this Chrome profile, only to show it to the user's local agent so it can tell several connected profiles apart (no tokens, no sign-in). |
+| contentSettings | Read (not change) the "Automatic downloads" site setting, so the agent can tell the user when Chrome is blocking or asking about a download. |
 | Host permission `<all_urls>` | The agent can be asked to work on any website the user chooses, so the extension must be able to read and interact with any page. |
 
 **Remote code**: No. All code is in the package. JavaScript strings sent by the user's local agent are executed only in the web page (through the debugger protocol), never in the extension.

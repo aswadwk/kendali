@@ -413,11 +413,13 @@
 
   // ---- misc ops ----------------------------------------------------------
   function read(a) {
-    const root = a.sel ? document.querySelector(a.sel)
+    // last:true with a selector → the last match (e.g. the newest chat message)
+    const root = a.sel ? (a.last ? [...document.querySelectorAll(a.sel)].pop() : document.querySelector(a.sel))
       : a.ref != null ? byRef(a.ref)
       : document.querySelector('main, article, [role=main]') || document.body;
     if (!root) throw new Error('element not found');
     const txt = root.innerText.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim();
+    if (a.raw) return txt;
     const off = a.offset || 0, max = a.max || 4000;
     const part = txt.slice(off, off + max);
     const rest = txt.length - off - part.length;
@@ -471,9 +473,12 @@
     scored.sort((x, y) => y[0] - x[0] || x[1] - y[1]);
     const top = scored[0][0];
     const good = scored.filter((x) => x[0] >= Math.min(top * 0.5, 4));
-    const shown = good.slice(0, 20);
+    // the best matches only: drop weak tails (well below the top score), then cap
+    const lim = Math.min(Math.max(+a.limit || 5, 1), 20);
+    const strong = good.filter((x) => x[0] >= top * 0.6);
+    const shown = strong.slice(0, lim);
     let res = shown.map((x) => x[2]).join('\n');
-    if (good.length > 20) res += `\n(${good.length} matches — more than 20; use a more specific query)`;
+    if (good.length > shown.length) res += `\n(${shown.length} of ${good.length} matches shown; raise limit (max 20) or use a more specific query)`;
     return res;
   }
 
@@ -483,9 +488,10 @@
       let hit = a.sel ? !!document.querySelector(a.sel) : document.body.innerText.toLowerCase().includes(String(a.text).toLowerCase());
       return a.gone ? !hit : hit;
     };
+    if (test()) return a.gone ? 'absent' : 'ok';
     while (Date.now() < end) {
-      if (test()) return 'ok';
       await sleep(100);
+      if (test()) return 'ok';
     }
     throw new Error(`timeout waiting for ${a.sel || `"${a.text}"`}${a.gone ? ' to disappear' : ''}`);
   }
@@ -540,7 +546,17 @@
     return { msg: `dropped ${file.name} (${u8.length} bytes) onto ${label(el)} at (${Math.round(x)},${Math.round(y)})` };
   }
 
-  const OPS = { snap, act, read, find, wait, rect, mark, drop };
+  // cheap signature of an element's (or the page's) text, to detect when streaming output settles
+  function sig(a) {
+    const el = a.sel ? [...document.querySelectorAll(a.sel)].pop() : document.body;
+    if (!el) return 'missing';
+    const t = el.innerText || '';
+    let h = 0;
+    for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0;
+    return `${t.length}:${h}`;
+  }
+
+  const OPS = { snap, act, read, find, wait, rect, mark, drop, sig };
   globalThis.__kd = async (op, a) => {
     try { return await OPS[op](a || {}); } catch (e) { return { __err: e.message || String(e) }; }
   };
