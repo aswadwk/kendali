@@ -26,6 +26,7 @@
   "permissions": [
     "tabs",
     "tabGroups",
+    "webNavigation",
     "scripting",
     "debugger",
     "downloads",

@@ -11,7 +11,7 @@ It works for text-only models (ref-based tools) and vision models (screenshots +
 
 ## Core loop (always follow)
 
-1. **Orient**: `tabs_context_mcp {createIfEmpty:true}` → your tabs (the green **Kendali** tab group) plus the user's other tabs. Work in the group tabs; use a user tab only if the user points to it. `tabs_create_mcp` opens another group tab. Pass `tabId` on every call.
+1. **Orient**: `tabs_context_mcp {createIfEmpty:true}` → your tabs (the green **Kendali** tab group) plus the user's other tabs. You can only control group tabs; the user's tabs are locked. If the user points to one of theirs, open its URL in your own tab, or ask them to drag it into the Kendali group. `tabs_create_mcp` opens another group tab. Pass `tabId` on every call.
    If the error says several browsers are connected: `list_connected_browsers` → ask the user which one → `select_browser {deviceId}`.
 2. **Look**: `read_page {tabId}` → compact list such as
    ```
@@ -100,6 +100,7 @@ Chat sites rename their selectors often: find the container of the newest reply 
 - **"a JS … dialog is open"**: call `handle_dialog` (accept or dismiss as the task requires).
 - **"Chrome extension not connected"**: the user must open Chrome with the Kendali extension enabled (badge **ON**). Tell them; don't loop.
 - **"cannot control this tab"**: `chrome://` pages, the Chrome Web Store, and other extensions' pages are off-limits. Use a normal tab.
+- **"tab … belongs to the user"**: the tab is outside the Kendali group. Don't retry; use `tabs_create_mcp` with the same URL, or ask the user to drag the tab into the group.
 - **Page still loading**: `wait_for {text|selector}` instead of fixed sleeps.
 - **`javascript_tool` says "still running"**: the script was not stopped and keeps going in the page. Don't rerun it. Store results on `window.*` and read them with a short call later, or raise `timeout_ms`.
 

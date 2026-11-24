@@ -20,5 +20,10 @@ $('saveName').onclick = async () => {
   refresh();
 };
 
+for (const k of ['onlyGroup', 'showCursor']) {
+  chrome.storage.local.get(k).then((v) => { $(k).checked = v[k] ?? true; });
+  $(k).onchange = () => chrome.storage.local.set({ [k]: $(k).checked });
+}
+
 refresh();
 setInterval(refresh, 1000);

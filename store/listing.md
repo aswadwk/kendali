@@ -62,6 +62,7 @@ Let a local AI agent (an MCP client on the user's own computer) control the brow
 |---|---|
 | tabs | List, open, switch and close tabs that the user's AI agent works in, and report their titles and URLs back to it. |
 | tabGroups | Keep the agent's tabs in a separate "Kendali" tab group so they don't mix with the user's own tabs. |
+| webNavigation | Recognize pages opened by a tab the agent controls (target=_blank links, login popups), so they join the Kendali tab group while the user's own new tabs stay off-limits; and detect when an action made the page navigate. |
 | scripting | Inject the content script that reads the page structure (element refs, text) and performs clicks, typing and form filling requested by the agent. |
 | debugger | Send trusted mouse and keyboard input, take screenshots, save pages as PDF, handle JavaScript dialogs and read console and network events of the tab the agent controls. Chrome shows its standard "is debugging this browser" bar while active. |
 | downloads | Download files the agent is asked to fetch, and report the saved file path back to it. |

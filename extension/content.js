@@ -353,6 +353,15 @@
     const el = locate(a);
     const what = label(el);
     const p = center(el);
+    if (a.cursor) {
+      try {
+        const at = topPoint(el, p);
+        const click = ['click', 'check', 'uncheck', 'select'].includes(action);
+        cursor({ pts: [at], from: a.cursor.from, click });
+        // the click may navigate before we can return: tell the background where the cursor is now
+        chrome.runtime.sendMessage({ type: 'cursorAt', at, click }).catch(() => {});
+      } catch { /* cosmetic only */ }
+    }
 
     switch (action) {
       case 'click': {
@@ -409,6 +418,92 @@
     }
     await settle();
     return { msg: `${action} ${what} ok` };
+  }
+
+  // ---- agent cursor ------------------------------------------------------
+  // A drawing only (real input goes through CDP / DOM events), so the user can see where the agent
+  // works. It must stay invisible to the agent: outside <body> (snapshots, innerText), closed
+  // shadow root (animations trigger no MutationObserver), pointer-events none (hit tests), and
+  // hidden while screenshots are taken. Callers never wait for the animation.
+  let cur = null;
+  function cursorHost() {
+    if (cur?.host.isConnected) return cur;
+    const host = document.createElement('kendali-cursor');
+    host.setAttribute('aria-hidden', 'true');
+    host.popover = 'manual'; // top layer: stays above modal dialogs
+    const css = { all: 'initial', position: 'fixed', inset: '0 auto auto 0', width: '0', height: '0', margin: '0', padding: '0', border: '0',
+      overflow: 'visible', background: 'none', 'pointer-events': 'none', 'z-index': '2147483647', display: 'block' };
+    for (const k in css) host.style.setProperty(k, css[k], 'important');
+    const root = host.attachShadow({ mode: 'closed' });
+    const sheet = new CSSStyleSheet(); // not a <style> tag: those are subject to the page's CSP
+    sheet.replaceSync(`
+      .c { position: absolute; left: 0; top: 0; opacity: 0; transition: opacity .25s; will-change: transform; }
+      .c svg { position: absolute; left: -3px; top: -2px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.45)); }
+      .r { position: absolute; width: 36px; height: 36px; margin: -18px 0 0 -18px; box-sizing: border-box; border: 3px solid #16a34a; border-radius: 50%; background: rgba(22,163,74,.2); opacity: 0; }`);
+    root.adoptedStyleSheets = [sheet];
+    const NS = 'http://www.w3.org/2000/svg';
+    const c = document.createElement('div'); c.className = 'c';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('width', '22'); svg.setAttribute('height', '26'); svg.setAttribute('viewBox', '0 0 22 26');
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', 'M3 2 L3 20 L7.8 15.8 L11 23 L14.4 21.5 L11.3 14.5 L18 14 Z');
+    path.setAttribute('fill', '#16a34a'); path.setAttribute('stroke', '#fff'); path.setAttribute('stroke-width', '1.6'); path.setAttribute('stroke-linejoin', 'round');
+    svg.append(path);
+    c.append(svg);
+    root.append(c);
+    document.documentElement.append(host);
+    return (cur = { host, root, c, x: null, y: null, idle: 0 });
+  }
+  function cursorHidden({ hidden }) {
+    cur?.host.style.setProperty('visibility', hidden ? 'hidden' : 'visible', 'important');
+  }
+  function cursorRemove() {
+    clearTimeout(cur?.idle);
+    cur?.host.remove();
+    cur = null;
+  }
+  // pts: [[x,y],…] in top-frame CSS px; from: where it was on the previous page;
+  // resume: only put it back if a navigation removed it
+  function cursor({ pts, from, click, resume }) {
+    if (resume && cur?.host.isConnected) return; // same document (SPA navigation): still here
+    const k = cursorHost();
+    const { c, root, host } = k;
+    try { if (host.matches(':popover-open')) host.hidePopover(); host.showPopover(); } catch { /* z-index only */ }
+    const at = ([x, y]) => `translate(${x}px, ${y}px)`;
+    const end = pts[pts.length - 1];
+    let start = k.x != null ? [k.x, k.y] : from || pts[0];
+    // interrupted mid-flight: continue from where it is drawn now
+    if (k.x != null && k.anim?.playState === 'running') {
+      const m = new DOMMatrixReadOnly(getComputedStyle(c).transform);
+      start = [m.e, m.f];
+    }
+    k.anim?.cancel();
+    const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const dist = Math.hypot(end[0] - start[0], end[1] - start[1]);
+    const ms = still ? 0 : Math.min(350, 120 + dist * 0.4) * pts.length;
+    [k.x, k.y] = end;
+    c.style.transform = at(end);
+    c.style.opacity = 1;
+    k.anim = c.animate([start, ...pts].map((p) => ({ transform: at(p) })), { duration: ms, easing: 'ease-out' });
+    if (click) {
+      const r = document.createElement('div'); r.className = 'r';
+      r.style.left = end[0] + 'px'; r.style.top = end[1] + 'px';
+      root.prepend(r);
+      const a = r.animate([{ transform: 'scale(.3)', opacity: 1 }, { transform: 'scale(1.3)', opacity: 0 }], { delay: ms, duration: 450, easing: 'ease-out' });
+      a.onfinish = a.oncancel = () => r.remove();
+    }
+    clearTimeout(k.idle);
+    k.idle = setTimeout(() => { c.style.opacity = 0; }, 30000);
+  }
+  function topPoint(el, p) {
+    let { x, y } = p;
+    try { // elements inside same-origin iframes: to top-frame coordinates
+      for (let f = el.ownerDocument.defaultView?.frameElement; f; f = f.ownerDocument.defaultView?.frameElement) {
+        const r = f.getBoundingClientRect();
+        x += r.left + f.clientLeft; y += r.top + f.clientTop;
+      }
+    } catch { /* cosmetic only */ }
+    return [x, y];
   }
 
   // ---- misc ops ----------------------------------------------------------
@@ -556,7 +651,7 @@
     return `${t.length}:${h}`;
   }
 
-  const OPS = { snap, act, read, find, wait, rect, mark, drop, sig };
+  const OPS = { snap, act, read, find, wait, rect, mark, drop, sig, cursor, cursorHidden, cursorRemove };
   globalThis.__kd = async (op, a) => {
     try { return await OPS[op](a || {}); } catch (e) { return { __err: e.message || String(e) }; }
   };

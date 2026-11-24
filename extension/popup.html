@@ -12,6 +12,9 @@
   input { flex: 1; padding: 4px 6px; }
   button { padding: 4px 10px; }
   p { color: #666; font-size: 12px; margin: 10px 0 0; }
+  .opt { display: flex; gap: 6px; align-items: flex-start; color: #111; margin: 10px 0 0; }
+  .opt input { flex: none; margin: 2px 0 0; padding: 0; }
+  .opt small { display: block; color: #666; }
   .id { color: #888; font-size: 11px; margin: 4px 0 10px; word-break: break-all; }
 </style>
 </head>
@@ -22,6 +25,8 @@
   <div class="id" id="dev"></div>
   <label for="port">MCP server port</label>
   <div class="row"><input id="port" type="number" min="1" max="65535"><button id="save">Save</button></div>
+  <label class="opt"><input type="checkbox" id="onlyGroup"><span>Only control tabs in the Kendali group<small>Agents can't touch your other tabs. Drag a tab into the group to hand it over, or out to take it back.</small></span></label>
+  <label class="opt"><input type="checkbox" id="showCursor"><span>Show the agent's cursor<small>Visual only: no extra tokens, hidden in screenshots.</small></span></label>
   <p>Add <code>node …/kendali/mcp-server/index.js</code> as an MCP server in your AI client. This extension connects to it automatically. <a href="https://github.com/aswadwk/kendali#install" target="_blank">Setup guide</a></p>
   <script src="popup.js"></script>
 </body>

@@ -359,11 +359,12 @@ Workflow: tabs_context_mcp → tabs_create_mcp (or navigate without tabId, which
 Ref-based tools are cheap and work for text-only models; screenshots + coordinates work for vision models (coordinates map 1:1 to clicks).
 Refs go stale after navigation: run read_page again. If a JS alert/confirm blocks the page, call handle_dialog.
 tabId is optional in most tools; it defaults to the tab Kendali used last.
+You can only control tabs in the Kendali tab group (the user's own tabs are locked, unless the user switched that off): open your own tab, or ask the user to drag theirs into the group.
 If several browsers are connected, call list_connected_browsers, ask the user, then select_browser.`,
   },
 );
 
-const tabId = z.number().int().optional().describe('Tab id from tabs_context_mcp. Defaults to the tab Kendali used last (else the focused tab).');
+const tabId = z.number().int().optional().describe('Tab id from tabs_context_mcp. Defaults to the tab Kendali used last.');
 const ref = z.union([z.string(), z.number()]).describe('Element reference from read_page/find, e.g. "ref_12"');
 const xy = z.array(z.number()).length(2);
 const summary = z.string().optional().describe('A few words on what this action does (shown in GIF recordings)');
@@ -412,17 +413,17 @@ const valueFromFile = async (a) => {
 
 // ---- tabs & navigation ----
 tool('tabs_context_mcp',
-  "List tabs: first those in Kendali's own tab group (yours to use), then the user's other tabs. Call this first. " +
-  'createIfEmpty:true adds a Kendali tab group tab to the already-open Chrome window if none exists (a new window only when Chrome has no window). Each new task should use its own tab (tabs_create_mcp) unless the user points at an existing one.', {
+  "List tabs: first those in Kendali's own tab group (yours to use), then the user's other tabs (locked by default). Call this first. " +
+  'createIfEmpty:true adds a Kendali tab group tab to the already-open Chrome window if none exists (a new window only when Chrome has no window). Each new task should use its own tab (tabs_create_mcp).', {
     createIfEmpty: z.boolean().optional(),
   });
 
 tool('tabs_create_mcp', "Create a new tab in Kendali's tab group (optionally at a URL, waiting for it to load). Returns the new tabId. Close it with tabs_close_mcp when done unless the user wants it kept.", {
   url: z.string().optional().describe('URL to open (https:// added if no scheme)'),
-  active: z.boolean().optional().describe('Focus the new tab (default true)'),
+  active: z.boolean().optional().describe('Bring the new tab to the front (default false: it opens in the background so the user can keep working; every tool, screenshots included, works on background tabs)'),
 });
 
-tool('tabs_close_mcp', 'Close one or more tabs by id.', {
+tool('tabs_close_mcp', 'Close one or more of your tabs (Kendali group) by id.', {
   tabId: z.number().int().optional(),
   tabIds: z.array(z.number().int()).optional(),
 });

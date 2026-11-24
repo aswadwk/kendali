@@ -139,7 +139,11 @@ chrome.runtime.onInstalled.addListener((d) => {
   // first install from the store: show how to add the MCP server to an AI client
   if (d.reason === 'install') chrome.tabs.create({ url: 'https://github.com/aswadwk/kendali#install' }).catch(() => {});
 });
-chrome.runtime.onMessage.addListener((msg, _s, send) => {
+chrome.runtime.onMessage.addListener((msg, sender, send) => {
+  if (msg?.type === 'cursorAt') {
+    if (sender.tab) cursorPos.set(sender.tab.id, { at: msg.at, click: msg.click, t: Date.now() });
+    return;
+  }
   if (msg?.type === 'status') {
     Promise.all([getPort(), identity()]).then(([port, id]) => send({ connected, port, ...id }));
     return true;
@@ -180,19 +184,62 @@ connect();
 async function setLast(id) {
   await chrome.storage.session.set({ kdLast: id }).catch(() => {});
 }
+// user settings (popup). Kept off the MCP side on purpose: an agent must not be able to change them.
+const settings = { onlyGroup: true, showCursor: true };
+const settingsReady = chrome.storage.local.get(Object.keys(settings)).then((v) => Object.assign(settings, v)).catch(() => {});
+chrome.storage.onChanged.addListener((ch, area) => {
+  if (area === 'local') for (const k of Object.keys(settings)) if (ch[k]) settings[k] = ch[k].newValue ?? true;
+});
+
+// Kendali's own tabs: everything in its tab group (the user can drag a tab in to hand it over, or
+// out to take it back), plus popups its tabs opened — popup windows can't hold groups.
+async function groupIds() {
+  const { kdGroup } = await chrome.storage.session.get('kdGroup').catch(() => ({}));
+  const ids = new Set((await chrome.tabGroups.query({ title: 'Kendali' }).catch(() => [])).map((g) => g.id));
+  if (kdGroup != null) ids.add(kdGroup);
+  return ids;
+}
+async function ownedPopups() {
+  const { kdOwned } = await chrome.storage.session.get('kdOwned').catch(() => ({}));
+  return new Set(kdOwned || []);
+}
+// tabs filtered to Kendali's own
+async function onlyMine(tabs) {
+  const [gids, popups] = await Promise.all([groupIds(), ownedPopups()]);
+  return tabs.filter((t) => (t.groupId > -1 ? gids.has(t.groupId) : popups.has(t.id)));
+}
+const isMine = async (tab) => (await onlyMine([tab])).length > 0;
+async function assertControllable(tab) {
+  await settingsReady;
+  // the extension's own pages hold the settings above: never controllable
+  if ((tab.url || tab.pendingUrl || '').startsWith(chrome.runtime.getURL(''))) throw new Error("Kendali's own pages can't be controlled");
+  if (!settings.onlyGroup || await isMine(tab)) return;
+  throw new Error(`tab ${tab.id} belongs to the user: Kendali may only control tabs in its own "Kendali" tab group. ` +
+    'Use tabs_create_mcp (you can open the same URL there). If this exact tab is needed, ask the user to drag it into the Kendali group.');
+}
+
 async function tabOf(a) {
+  await settingsReady;
   if (a.tabId != null) {
     let t;
     try { t = await chrome.tabs.get(+a.tabId); } catch { throw new Error(`tab ${a.tabId} not found — call tabs_context_mcp`); }
+    await assertControllable(t);
     setLast(t.id);
     return t;
   }
-  // default: the tab Kendali used last, else the focused tab
+  // default: the tab Kendali used last
   const { kdLast } = await chrome.storage.session.get('kdLast').catch(() => ({}));
   if (kdLast != null) {
     const t = await chrome.tabs.get(kdLast).catch(() => null);
-    if (t) return t;
+    if (t && await assertControllable(t).then(() => true, () => false)) return t;
   }
+  if (settings.onlyGroup) {
+    const [t] = await groupTabs();
+    if (!t) throw new Error('no Kendali tab yet — call tabs_create_mcp');
+    await assertControllable(t);
+    return t;
+  }
+  // lock switched off by the user: the focused tab
   const [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (t) return t;
   const [t2] = await chrome.tabs.query({ active: true });
@@ -222,16 +269,85 @@ function dialogGuard(tabId) {
   if (d) throw new Error(`a JS ${d.type} dialog is open ("${d.message}") — call handle_dialog first`);
 }
 
-// run an op from content.js (isolated world)
-async function page(tabId, op, a = {}) {
-  dialogGuard(tabId);
-  const go = async () => {
+// ---- agent cursor (drawn by content.js; purely visual, never awaited) ----
+const cursorPos = new Map(); // tabId -> { at:[x,y], click, t }
+// null unless the user can actually see the tab
+async function cursorFor(tab) {
+  await settingsReady;
+  return settings.showCursor && tab.active ? { from: cursorPos.get(tab.id)?.at } : null;
+}
+function drawCursor(tab, pts, click = false) {
+  if (!settings.showCursor || !tab.active) return;
+  const from = cursorPos.get(tab.id)?.at;
+  cursorPos.set(tab.id, { at: pts[pts.length - 1], click, t: Date.now() });
+  runCursor(tab.id, { pts, from, click });
+}
+async function runCursor(tabId, a) {
+  try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
-    const [r] = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: (op, a) => globalThis.__kd(op, a),
-      args: [op, a],
-    });
+    await chrome.scripting.executeScript({ target: { tabId }, func: (a) => { globalThis.__kd('cursor', a); }, args: [a] });
+  } catch { /* cosmetic only: page navigating, restricted page… */ }
+}
+// only where content.js is already injected; best effort
+function cursorOp(tabId, op, args = {}) {
+  return withTimeout(chrome.scripting.executeScript({
+    target: { tabId }, func: (op, args) => { globalThis.__kd?.(op, args); }, args: [op, args],
+  }), 1000, 'cursor timed out').catch(() => {});
+}
+// the cursor must never cover what the model sees
+async function withoutCursor(tabId, fn) {
+  await cursorOp(tabId, 'cursorHidden', { hidden: true });
+  try { return await fn(); } finally { cursorOp(tabId, 'cursorHidden', { hidden: false }); }
+}
+// a click that navigates takes the cursor away with the old page: bring it back on the new one
+chrome.tabs.onUpdated.addListener((tabId, ch, tab) => {
+  const p = cursorPos.get(tabId);
+  if (ch.status !== 'complete' || !p || Date.now() - p.t > 15000) return;
+  setTimeout(() => {
+    if (settings.showCursor && tab.active && cursorPos.get(tabId) === p) runCursor(tabId, { pts: [p.at], from: p.at, click: p.click, resume: true });
+  }, 600); // let the page hydrate before adding a node to it
+});
+
+// A page that is navigated away while a script awaits in it may be frozen in the back/forward cache:
+// executeScript then never answers. A commit of another document in the tab means exactly that.
+const navWaiters = new Set(); // ({ tabId, documentId }) => void
+chrome.webNavigation?.onCommitted.addListener((d) => {
+  if (d.frameId === 0) for (const w of navWaiters) w(d);
+});
+const navError = () => Object.assign(new Error('the page navigated during this call — run read_page again'), { navigated: true });
+
+// run an op from content.js (isolated world). Reads are repeated on the new page if it navigates
+// meanwhile; anything else throws an error with .navigated (refs are gone, and it may have had effect).
+async function page(tabId, op, a = {}) {
+  try {
+    return await pageOnce(tabId, op, a);
+  } catch (e) {
+    if (!e.navigated || !['snap', 'read', 'find'].includes(op)) throw e;
+    await waitLoad(tabId, 10000);
+    return pageOnce(tabId, op, a);
+  }
+}
+async function pageOnce(tabId, op, a) {
+  dialogGuard(tabId);
+  let docId = null, waiter;
+  const navigated = new Promise((_, rej) => {
+    waiter = (d) => { if (d.tabId === tabId && docId && d.documentId !== docId) rej(navError()); };
+    navWaiters.add(waiter);
+  });
+  const go = async () => {
+    const [inj] = await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+    docId = inj?.documentId;
+    let r;
+    try {
+      [r] = await chrome.scripting.executeScript({
+        target: docId ? { tabId, documentIds: [docId] } : { tabId }, // never run in a page that replaced it
+        func: (op, a) => globalThis.__kd(op, a),
+        args: [op, a],
+      });
+    } catch (e) {
+      if (/no document|frame.*(removed|not found)|no frame/i.test(e.message)) throw navError();
+      throw e;
+    }
     return r?.result;
   };
   // an alert()/confirm() opened by the action blocks the page script: notice it instead of hanging
@@ -239,8 +355,8 @@ async function page(tabId, op, a = {}) {
   const dialogOpened = new Promise((res) => {
     poll = setInterval(() => { const d = dbg.get(tabId)?.dialog; if (d) res({ __dialog: d }); }, 150);
   });
-  const v = await withTimeout(Promise.race([go(), dialogOpened]), (a.timeout || 0) + 30000,
-    'page did not respond (a JS dialog may be open → handle_dialog, or the page is hung)').finally(() => clearInterval(poll));
+  const v = await withTimeout(Promise.race([go(), dialogOpened, navigated]), (a.timeout || 0) + 30000,
+    'page did not respond (a JS dialog may be open → handle_dialog, or the page is hung)').finally(() => { clearInterval(poll); navWaiters.delete(waiter); });
   if (v?.__dialog) throw new Error(`a JS ${v.__dialog.type} dialog opened ("${v.__dialog.message}") — call handle_dialog`);
   if (v && v.__err) throw new Error(v.__err);
   return v;
@@ -282,6 +398,10 @@ async function attach(tabId) {
   for (const m of ['Page.enable', 'Runtime.enable', 'Log.enable', 'Network.enable']) {
     await chrome.debugger.sendCommand(target, m, {}).catch(() => {});
   }
+  // A background tab is "hidden": Chrome throttles its timers to ~1s and pauses rAF, so waits
+  // and settles crawl. Focus emulation makes the page behave as visible + focused, which lets
+  // Kendali work in its own tab while the user keeps using another tab — no tab switching.
+  await chrome.debugger.sendCommand(target, 'Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
   return st;
 }
 
@@ -332,7 +452,37 @@ chrome.debugger.onEvent.addListener((src, method, p) => {
   }
 });
 chrome.debugger.onDetach.addListener((src) => dbg.delete(src.tabId));
-chrome.tabs.onRemoved.addListener((id) => dbg.delete(id));
+chrome.tabs.onRemoved.addListener((id) => {
+  dbg.delete(id);
+  cursorPos.delete(id);
+  ownedPopups().then((o) => { if (o.delete(id)) return chrome.storage.session.set({ kdOwned: [...o] }); }).catch(() => {});
+});
+// the user dragged a tab out of the group: let go of it at once (removes the debugging bar too)
+chrome.tabs.onUpdated.addListener(async (id, ch, tab) => {
+  if (ch.groupId == null || !dbg.has(id)) return;
+  await settingsReady;
+  if (!settings.onlyGroup || await isMine(tab)) return;
+  await chrome.debugger.detach({ tabId: id }).catch(() => {});
+  dbg.delete(id);
+  cursorPos.delete(id);
+  cursorOp(id, 'cursorRemove');
+});
+// pages opened by a Kendali tab (target=_blank, window.open, login popups) are Kendali's too.
+// onCreatedNavigationTarget fires only for page-opened tabs, not for the user's own Cmd/Ctrl+T.
+chrome.webNavigation?.onCreatedNavigationTarget.addListener(async ({ sourceTabId, tabId }) => {
+  const src = await chrome.tabs.get(sourceTabId).catch(() => null);
+  if (!src || !await isMine(src)) return;
+  const t = await chrome.tabs.get(tabId).catch(() => null);
+  if (!t || await isMine(t)) return;
+  const win = await chrome.windows.get(t.windowId).catch(() => null);
+  if (win?.type === 'normal') await addToGroup(t.id);
+  else await ownPopup(t.id);
+});
+async function ownPopup(id) {
+  const o = await ownedPopups();
+  o.add(id);
+  await chrome.storage.session.set({ kdOwned: [...o] }).catch(() => {});
+}
 
 // ---- input -----------------------------------------------------------
 const BTN = { left: 1, right: 2, middle: 4 };
@@ -413,16 +563,35 @@ async function viewport(tabId) {
   return { w: v.clientWidth, h: v.clientHeight, content: m.cssContentSize || m.contentSize };
 }
 
-async function activate(tab) {
-  if (!tab.active) {
-    await chrome.tabs.update(tab.id, { active: true });
-    await sleep(150);
+// CDP captures background tabs fine (focus emulation keeps them rendering), so the user's
+// current tab is left alone. Only if that capture stalls (e.g. a minimized window) is the tab
+// brought to the front briefly — and the window's previous tab is restored right after.
+let bgCaptureOk = false; // a background capture worked once → allow it the full timeout
+async function capture(tab, params) {
+  const live = await chrome.tabs.get(tab.id).catch(() => tab);
+  if (live.active) return cdp(tab.id, 'Page.captureScreenshot', params, 60000);
+  const win = await chrome.windows.get(live.windowId).catch(() => null);
+  if (win?.state !== 'minimized') {
+    try {
+      const r = await cdp(tab.id, 'Page.captureScreenshot', params, bgCaptureOk ? 30000 : 5000);
+      bgCaptureOk = true;
+      return r;
+    } catch (e) {
+      if (!/timed out/.test(e.message)) throw e;
+    }
+  }
+  const [prev] = await chrome.tabs.query({ active: true, windowId: live.windowId }).catch(() => []);
+  await chrome.tabs.update(tab.id, { active: true });
+  await sleep(150);
+  try {
+    return await cdp(tab.id, 'Page.captureScreenshot', params, 60000);
+  } finally {
+    if (prev && prev.id !== tab.id) await chrome.tabs.update(prev.id, { active: true }).catch(() => {});
   }
 }
 
 async function screenshot(tab, a = {}) {
   const tabId = tab.id;
-  await activate(tab);
   dialogGuard(tabId);
   const vp = await viewport(tabId);
   let params = { format: 'png' };
@@ -430,7 +599,7 @@ async function screenshot(tab, a = {}) {
     const c = vp.content;
     params = { format: 'png', captureBeyondViewport: true, clip: { x: 0, y: 0, width: c.width, height: Math.min(c.height, 12000), scale: 1 } };
   }
-  const { data } = await cdp(tabId, 'Page.captureScreenshot', params, 60000);
+  const { data } = await withoutCursor(tabId, () => capture(tab, params));
   const bmp = await createImageBitmap(await b64ToBlob(data, 'image/png'));
   let sx = 0, sy = 0, sw = bmp.width, sh = bmp.height, ow, oh;
   if (a.region) {
@@ -482,7 +651,11 @@ async function groupTabs() {
   const g = await getGroup();
   return g == null ? [] : chrome.tabs.query({ groupId: g });
 }
-async function addToGroup(tabId) {
+let grouping = Promise.resolve(); // one at a time: parallel first tabs must not create two groups
+function addToGroup(tabId) {
+  return (grouping = grouping.then(() => groupTab(tabId)));
+}
+async function groupTab(tabId) {
   let g = await getGroup();
   try {
     if (g != null) return await chrome.tabs.group({ groupId: g, tabIds: [tabId] });
@@ -490,7 +663,10 @@ async function addToGroup(tabId) {
     await chrome.tabGroups.update(g, { title: 'Kendali', color: 'green' });
     await chrome.storage.session.set({ kdGroup: g });
     return g;
-  } catch { return null; } // e.g. popup windows can't hold groups
+  } catch { // e.g. popup windows can't hold groups
+    await ownPopup(tabId);
+    return null;
+  }
 }
 // a normal window of this (already open) profile: the last focused one, else any
 async function openWindow() {
@@ -505,7 +681,7 @@ async function ensureGroupTab() {
   // opening another window of the same profile. Only create a window when none exists.
   const win = await openWindow();
   const tab = win
-    ? await chrome.tabs.create({ url: 'about:blank', active: true, windowId: win.id })
+    ? await chrome.tabs.create({ url: 'about:blank', active: false, windowId: win.id }) // don't pull the user off their tab
     : (await chrome.windows.create({ url: 'about:blank', focused: true })).tabs[0];
   await addToGroup(tab.id);
   await setLast(tab.id);
@@ -513,7 +689,9 @@ async function ensureGroupTab() {
 }
 
 async function tabsContext() {
-  const [tabs, mine, [focused]] = await Promise.all([chrome.tabs.query({}), groupTabs(), chrome.tabs.query({ active: true, lastFocusedWindow: true })]);
+  await settingsReady;
+  const [tabs, [focused]] = await Promise.all([chrome.tabs.query({}), chrome.tabs.query({ active: true, lastFocusedWindow: true })]);
+  const mine = await onlyMine(tabs);
   const ids = new Set(mine.map((t) => t.id));
   const line = (t) => {
     const flags = [t.id === focused?.id ? 'FOCUSED' : t.active ? 'active' : '', t.status === 'loading' ? 'loading' : '', dbg.has(t.id) ? 'debug' : ''].filter(Boolean).join(',');
@@ -522,7 +700,11 @@ async function tabsContext() {
   const out = [mine.length ? `Kendali tab group (${mine.length} tab${mine.length > 1 ? 's' : ''}) — yours to use:` : 'Kendali tab group: none yet (tabs_create_mcp, or tabs_context_mcp {createIfEmpty:true})', ...mine.map(line)];
   const own = chrome.runtime.getURL('');
   const others = tabs.filter((t) => !ids.has(t.id) && !(t.url || t.pendingUrl || '').startsWith(own));
-  if (others.length) out.push(`Other tabs (the user's — only use one if the user asks):`, ...others.map(line));
+  if (others.length && settings.onlyGroup) {
+    // no tabIds: these can't be controlled; the URL is enough to open the same page in an own tab
+    out.push("The user's tabs (locked: you can't control them. Open the same URL with tabs_create_mcp, or ask the user to drag the tab into the Kendali group):",
+      ...others.map((t) => line(t).replace(/^ {2}tabId \d+/, '  -')));
+  } else if (others.length) out.push(`Other tabs (the user's — only use one if the user asks):`, ...others.map(line));
   return out.join('\n');
 }
 
@@ -536,7 +718,7 @@ T.tabs_create_mcp = async (a) => {
   let windowId;
   if (g != null) windowId = (await chrome.tabGroups.get(g)).windowId;
   else windowId = (await openWindow())?.id;
-  const t = await chrome.tabs.create({ url: a.url ? normUrl(a.url) : 'about:blank', active: a.active !== false, windowId });
+  const t = await chrome.tabs.create({ url: a.url ? normUrl(a.url) : 'about:blank', active: a.active === true, windowId }); // background by default
   await addToGroup(t.id);
   await setLast(t.id);
   const done = a.url ? await waitLoad(t.id, a.timeout || 20000) : t;
@@ -546,6 +728,12 @@ T.tabs_create_mcp = async (a) => {
 T.tabs_close_mcp = async (a) => {
   const ids = [].concat(a.tabIds ?? a.tabId ?? []).map(Number);
   if (!ids.length) throw new Error('tabId or tabIds required');
+  // all must be Kendali's before any is closed
+  for (const id of ids) {
+    const t = await chrome.tabs.get(id).catch(() => null);
+    if (!t) throw new Error(`tab ${id} not found — call tabs_context_mcp`);
+    await assertControllable(t);
+  }
   await chrome.tabs.remove(ids);
   return `closed ${ids.join(', ')}`;
 };
@@ -559,6 +747,7 @@ T.tabs_switch = async (a) => {
 
 function normUrl(u) {
   u = String(u).trim();
+  if (new RegExp(`^chrome-extension:/*${chrome.runtime.id}`, 'i').test(u)) throw new Error("Kendali's own pages can't be opened by an agent");
   if (/^[a-z][a-z0-9+.-]*:/i.test(u)) return u;
   return 'https://' + u;
 }
@@ -681,13 +870,17 @@ T.act = async (a) => {
   delete args.tabId;
   delete args.selector;
   delete args.snapshot;
+  args.cursor = await cursorFor(tab);
   let r;
   try {
     r = await page(tab.id, 'act', args);
   } catch (e) {
-    if (/frame|navigat|closed|removed|No tab/i.test(e.message)) return `${a.action} done — page navigated`;
     if (/dialog opened/.test(e.message)) return `${a.action} done\n⚠ ${e.message}`;
-    throw e;
+    if (!e.navigated) {
+      if (!await chrome.tabs.get(tab.id).catch(() => null)) return `${a.action} done — the tab closed`;
+      throw e;
+    }
+    await waitLoad(tab.id, 10000).catch(() => {}); // the action worked: show the new page below
   }
   if (r?.cdp) await doCdpAction(tab.id, r.cdp);
   let out = r?.msg || `${a.action} done — page navigated`;
@@ -709,7 +902,12 @@ T.form_input = async (a) => {
   if (typeof a.value === 'boolean') action = a.value ? 'check' : 'uncheck';
   else if (mk.tag === 'SELECT') action = 'select';
   else if (mk.type === 'checkbox' || mk.type === 'radio') action = String(a.value) === 'false' ? 'uncheck' : 'check';
-  const r = await page(tab.id, 'act', { ...loc, action, value: a.value });
+  const r = await page(tab.id, 'act', { ...loc, action, value: a.value, cursor: await cursorFor(tab) })
+    .catch(async (e) => { // e.g. a <select> that submits on change
+      if (!e.navigated) throw e;
+      const t = await waitLoad(tab.id, 10000).catch(() => tab);
+      return { msg: `${action} done — page navigated: ${t.title} | ${t.url}` };
+    });
   return r?.msg || 'ok';
 };
 
@@ -754,6 +952,7 @@ T.computer = async (a) => {
     const dir = a.scroll_direction || 'down';
     const dx = dir === 'left' ? -amt : dir === 'right' ? amt : 0;
     const dy = dir === 'up' ? -amt : dir === 'down' ? amt : 0;
+    drawCursor(tab, [[x, y]]);
     await mouse(id, 'mouseMoved', x, y);
     await mouse(id, 'mouseWheel', x, y, { dx, dy });
     await sleep(250);
@@ -761,6 +960,7 @@ T.computer = async (a) => {
   }
   if (x == null || y == null) throw new Error(`${act} needs coordinate [x,y] or ref`);
   const mods = parseMods(a.modifiers);
+  drawCursor(tab, act === 'left_click_drag' && a.start_coordinate ? [a.start_coordinate, [x, y]] : [[x, y]], /_click/.test(act));
   switch (act) {
     case 'left_click': await click(id, x, y, { mods }); break;
     case 'right_click': await click(id, x, y, { button: 'right', mods }); break;
@@ -882,9 +1082,9 @@ T.resize_window = async (a) => {
 T.save_pdf = async (a) => {
   const tab = await tabOf(a);
   dialogGuard(tab.id);
-  const r = await cdp(tab.id, 'Page.printToPDF', {
+  const r = await withoutCursor(tab.id, () => cdp(tab.id, 'Page.printToPDF', {
     printBackground: a.print_background !== false, landscape: !!a.landscape, preferCSSPageSize: true,
-  }, 120000);
+  }, 120000));
   return { text: `PDF of ${tab.title} | ${tab.url}`, file: { data: r.data, ext: 'pdf' } };
 };
 

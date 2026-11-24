@@ -47,7 +47,7 @@ Tool names and parameters match **Claude in Chrome** (`mcp__claude-in-chrome__*`
 
 | Tool | What it does |
 |---|---|
-| `tabs_context_mcp`, `tabs_create_mcp`, `tabs_close_mcp`, `tabs_switch` | Agent tabs live in a green **Kendali** tab group, and the user's own tabs are listed separately. `createIfEmpty:true` opens a window when the group is empty |
+| `tabs_context_mcp`, `tabs_create_mcp`, `tabs_close_mcp`, `tabs_switch` | Agent tabs live in a green **Kendali** tab group, and the user's own tabs are listed separately and locked: agents can only control tabs in the group, including pages those tabs open (drag a tab into the group to hand it over, or turn this off in the extension popup). `createIfEmpty:true` opens a window when the group is empty |
 | `navigate` | URL, `back`, `forward`, `reload` (waits for load). With no `tabId` it uses the group tab |
 | `read_page` | Snapshot with `[ref_N]` refs. Options: `filter:"interactive"\|"all"`, `ref_id` (subtree), `depth`, `max_chars`, plus `scope:"all"` and `diff:true` |
 | `find` | Natural-language search (`"search bar"`, `"login button"`). Returns at most 20 refs |
